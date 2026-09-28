@@ -5,7 +5,7 @@ const path = require("node:path");
 const LEGACY_NAVER_SEARCH_URL = "https://search.naver.com/search.naver?where=web&query={query}";
 const DEFAULT_NAVER_SEARCH_URL = "https://search.naver.com/search.naver?ssc=tab.blog.all&sm=tab_jum&query={query}";
 const DEFAULT_IMAGE_ASPECT_RATIO = "16:9";
-const IMAGE_ASPECT_RATIOS = new Set([DEFAULT_IMAGE_ASPECT_RATIO, "9:16", "1:1"]);
+const IMAGE_ASPECT_RATIOS = new Set([DEFAULT_IMAGE_ASPECT_RATIO, "9:16", "1:1", "3:4"]);
 const CODEX_MODEL_IDS = new Set([
   "",
   "gpt-5.6-sol",
@@ -29,10 +29,11 @@ const DEFAULT_SETTINGS = {
   naverSearchUrl: DEFAULT_NAVER_SEARCH_URL,
   googleSearchUrl: "https://www.google.com/search?q={query}&num=20&hl=ko",
   naverEditorDomNotes: "",
-  publishAfterGenerate: false,
+  publishAfterGenerate: true,
   publishPrivate: true,
-  topicMode: "manual",
+  topicMode: "auto",
   repeatTermMinutes: 60,
+  crossPublish: false,
   publishVisibility: "private",
   publishScheduleMode: "now",
   reserveAfterHours: 3,
@@ -69,7 +70,7 @@ function ensureSettingsFile(runtimeRoot) {
 }
 
 function normalizeSettings(settings) {
-  const normalized = { ...settings };
+  const normalized = { ...settings, topicMode: "auto", topic: "", publishAfterGenerate: true, breakSentencesInBody: true };
   if (!String(normalized.blogId || "").trim() && String(normalized.naverId || "").trim()) {
     normalized.blogId = String(normalized.naverId).trim();
   }
@@ -129,7 +130,13 @@ function findDesktopCodexExecutable() {
 
 function resolveCodexCmdPath(value) {
   const raw = String(value || "").trim();
-  if (!isDefaultCodexCmdPath(raw)) return raw;
+  if (!isDefaultCodexCmdPath(raw)) {
+    // Desktop updates replace their versioned bin directory. Preserve custom CLI paths.
+    const root = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "OpenAI", "Codex", "bin");
+    const relative = path.relative(root, raw);
+    if (!fs.existsSync(raw) && relative && !relative.startsWith('..') && !path.isAbsolute(relative) && path.basename(raw).toLowerCase()==='codex.exe') return findDesktopCodexExecutable() || raw;
+    return raw;
+  }
   return findDesktopCodexExecutable() || raw || DEFAULT_SETTINGS.codexCmdPath;
 }
 
@@ -188,7 +195,17 @@ function writeSettings(runtimeRoot, nextSettings) {
     ...Object.fromEntries(Object.entries(nextSettings || {}).filter(([, value]) => value !== undefined))
   };
   const normalized = normalizeSettings(merged);
-  fs.writeFileSync(getSettingsPath(runtimeRoot), `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
+  // A stopped app must retain either the previous complete checkpoint or the
+  // new one, never a truncated settings file that reads as default settings.
+  const destination=getSettingsPath(runtimeRoot);
+  const temporary=destination+'.'+process.pid+'.tmp';
+  try{
+    fs.writeFileSync(temporary, `${JSON.stringify(normalized, null, 2)}\n`, {encoding:'utf8',flush:true});
+    fs.renameSync(temporary,destination);
+  }catch(error){
+    try{fs.unlinkSync(temporary);}catch{}
+    throw error;
+  }
   return normalized;
 }
 

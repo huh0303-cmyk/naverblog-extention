@@ -1,6 +1,17 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("blogAuto", {
+  platform: process.platform,
+  openTistoryChrome: blogId => ipcRenderer.invoke('tistory:open',blogId),
+  pairTistoryExtension: blogId => ipcRenderer.invoke('tistory:pair',blogId),
+  setWindowTheme: theme => ipcRenderer.invoke('window:theme', theme),
+  cancelConnectionTask: id => ipcRenderer.invoke('extension:cancel',id),
+  openAccountChrome: id => ipcRenderer.invoke('chrome:openAccount',id),
+  prepareExtension: () => ipcRenderer.invoke('extension:setup'),
+  copyExtensionsUrl: () => ipcRenderer.invoke('extension:copy'),
+  pairExtension: id => ipcRenderer.invoke('extension:pair',id),
+  getConnections: () => ipcRenderer.invoke('extension:connections'),
+  revokeConnection: id => ipcRenderer.invoke('extension:revoke',id),
   getInitialData: () => ipcRenderer.invoke("app:getInitialData"),
   openChromeInstallAndQuit: () => ipcRenderer.invoke("chrome:installAndQuit"),
   refreshCodexUsage: () => ipcRenderer.invoke("codex:refreshUsage"),
@@ -9,13 +20,18 @@ contextBridge.exposeInMainWorld("blogAuto", {
   chooseAccountSampleImage: (accountId) => ipcRenderer.invoke("accounts:chooseSampleImage", accountId),
   deleteAccountSampleImage: (accountId) => ipcRenderer.invoke("accounts:deleteSampleImage", accountId),
   checkAccountSession: (accountId, options) => ipcRenderer.invoke("accounts:checkSession", accountId, options),
+  checkAllSessions: () => ipcRenderer.invoke('accounts:checkAllSessions'),
   checkTistorySession: (tistoryBlogId) => ipcRenderer.invoke("tistory:checkSession", tistoryBlogId),
   testTistoryPublish: (form) => ipcRenderer.invoke("tistory:testPublish", form),
   loadHistory: () => ipcRenderer.invoke("history:load"),
+  getPendingPublishState: () => ipcRenderer.invoke('job:pendingState'),
+  cancelPendingPublish: () => ipcRenderer.invoke('job:cancelPending'),
   startJob: (form) => ipcRenderer.invoke("job:start", form),
   openRuntimeFolder: () => ipcRenderer.invoke("runtime:open"),
   openFile: (filePath) => ipcRenderer.invoke("file:open", filePath),
   showFileInFolder: (filePath) => ipcRenderer.invoke("file:showInFolder", filePath),
+  respondModelError: choice=>ipcRenderer.invoke('job:modelRetry',choice),
+  onModelError: handler=>ipcRenderer.on('job:modelError',(_event,payload)=>handler(payload)),
   onLog: (handler) => {
     ipcRenderer.on("job:log", (_event, payload) => handler(payload));
   },

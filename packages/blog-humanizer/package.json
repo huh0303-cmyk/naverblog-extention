@@ -1,0 +1,10 @@
+{
+  "name": "@blogauto/blog-humanizer",
+  "version": "0.1.1",
+  "description": "Reusable Korean blog editing with an injected model runner",
+  "main": "index.js",
+  "type": "commonjs",
+  "license": "MIT",
+  "engines": { "node": ">=18" },
+  "files": ["index.js", "SKILL.md", "references", "LICENSE", "NOTICE.md", "README.md"]
+}

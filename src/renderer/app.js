@@ -1,7 +1,18 @@
+async function refreshPendingPublishButton(){
+  const button=document.querySelector('#cancelPendingJobButton');
+  if(!button || button.dataset.cancelling)return;
+  try{
+    const pending=await window.blogAuto.getPendingPublishState();
+    if(button.dataset.cancelling)return;
+    button.disabled=!pending.available || pending.busy;
+    button.title=pending.busy?'현재 작업 종료 후 취소할 수 있습니다.':pending.available?'보류 원고와 불확실 상태를 해제합니다. 게시글·기록·파일은 삭제하지 않습니다.':'취소할 기존 작업이 없습니다.';
+  }catch{button.disabled=true;}
+}
 const state = {
   currentJobId: "",
   running: false,
   autoRunning: false,
+  bulkChecking: false,
   autoPausedForSession: false,
   autoWaitingSessionAccountId: "",
   autoResumeAccountId: "",
@@ -48,10 +59,10 @@ const AGENT_MODEL_SELECTORS = {
   image: "#imageWorkerModel"
 };
 const VALID_AGENT_MODEL_VALUES = new Set(["low", "medium", "high", "xhigh"]);
-const AUTO_TARGET_MAX_ATTEMPTS = 3;
-const AUTO_RESEARCH_MAX_ATTEMPTS = 2;
+const AUTO_TARGET_MAX_ATTEMPTS = 1;
+const AUTO_RESEARCH_MAX_ATTEMPTS = 1;
 const DEFAULT_IMAGE_ASPECT_RATIO = "16:9";
-const IMAGE_ASPECT_RATIOS = new Set([DEFAULT_IMAGE_ASPECT_RATIO, "9:16", "1:1"]);
+const IMAGE_ASPECT_RATIOS = new Set([DEFAULT_IMAGE_ASPECT_RATIO, "9:16", "1:1", "3:4"]);
 
 function normalizeImageAspectRatio(value) {
   const normalized = String(value || "").trim();
@@ -154,19 +165,25 @@ function setTistoryTestButtonDisabled(disabled) {
 }
 
 function addLog(payload) {
+  if (/프롬프트\s*크기\s*:|토큰\s*사용량\s*:|^tokens?\s+used\b/i.test(String(payload.message || ''))) return;
   const streamMap = {
     main: "#mainLogStream",
     research: "#researchLogStream",
     writer: "#writerLogStream",
+    humanizer: "#writerLogStream",
     image: "#mainLogStream"
   };
   const stream = $(streamMap[payload.agent] || streamMap.main);
   if (!stream) return;
+  const key = String(payload.message || '');
+  if (stream.dataset.lastMessage === key && Date.now() - Number(stream.dataset.lastAt || 0) < 5000) return;
+  stream.dataset.lastMessage = key; stream.dataset.lastAt = String(Date.now());
   const line = document.createElement("div");
   line.className = `log-line ${payload.level || "info"}`;
   const time = payload.at ? new Date(payload.at).toLocaleTimeString() : new Date().toLocaleTimeString();
   line.textContent = `[${time}] ${payload.message}`;
   stream.appendChild(line);
+  while (stream.children.length > 300) stream.firstElementChild.remove();
   stream.scrollTop = stream.scrollHeight;
 }
 
@@ -304,11 +321,12 @@ function statusBadge(status) {
   return `<span class="badge ${classMap[status] || "info"}">${labelMap[status] || status || "대기"}</span>`;
 }
 
+function loginDisplayConfirmed(account){return account.sessionStatus==='valid' || Boolean(account.connection?.connected && account.connection.loginStatus==='valid' && !['expired','security_check','account_mismatch','waiting_login'].includes(account.sessionStatus));}
 function sessionBadge(account) {
-  const status = account.sessionStatus || "unknown";
-  const className = status === "valid" ? "success" : status === "expired" ? "danger" : "warning";
-  const label = status === "valid" ? "정상" : status === "expired" ? "세션만료" : "미확인";
-  return `<span class="badge ${className}">${label}</span>`;
+  if(account.connection?.connected && account.connection.loginStatus==='valid' && ['unknown','checking'].includes(account.sessionStatus))return '<span class="badge success">로그인 확인됨 · 상태 갱신 중</span>';
+  const labels={valid:'로그인 확인됨',waiting_login:'로그인 대기',expired:'로그인 필요',disconnected:'확장 연결 없음',security_check:'추가 인증 필요',account_mismatch:'다른 계정 로그인',checking:'로그인 확인 중',unknown:'로그인 미확인'};
+  const status=account.sessionStatus || 'unknown';
+  return '<span class="badge '+(status==='valid'?'success':'warning')+'">'+(labels[status] || labels.unknown)+'</span>';
 }
 
 function updateSessionNotice() {
@@ -317,20 +335,20 @@ function updateSessionNotice() {
   if (!notice || !text) return;
 
   const accounts = state.accountStore.accounts || [];
-  const needsLogin = !accounts.length || accounts.some((account) => account.sessionStatus !== "valid");
+  const needsLogin = !accounts.length || accounts.some((account) => !loginDisplayConfirmed(account));
   if (!needsLogin) {
     notice.hidden = true;
     return;
   }
 
   if (!accounts.length) {
-    text.textContent = "처음 실행 상태입니다. 계정을 추가한 뒤 계정별 세션 확인을 눌러 브라우저에서 로그인을 완료해 주세요.";
+    text.textContent = "계정을 추가한 뒤 ‘블로그 열기 / 로그인’을 누르세요. 처음에는 해당 Chrome의 확장프로그램 연결도 필요합니다.";
   } else {
     const names = accounts
-      .filter((account) => account.sessionStatus !== "valid")
+      .filter((account) => !loginDisplayConfirmed(account))
       .map((account) => accountDisplayName(account))
       .join(", ");
-    text.textContent = `로그인이 필요한 계정: ${names}. 계정별로 선택 후 세션 확인을 진행해 주세요.`;
+    text.textContent = `연결·확인이 필요한 계정: ${names}. ‘블로그 열기 / 로그인’을 누르세요. 확장 연결 후에는 로그인 상태를 확인할 수 있습니다.`;
   }
   notice.hidden = false;
 }
@@ -351,158 +369,54 @@ function signalAutoSessionResume(accountId) {
   }
 }
 
-async function checkAccountSession(account, options = {}) {
-  if (!account) return;
-  const resumeAuto = options.resumeAuto !== false;
-  const startAuto = options.startAuto !== false;
-  setRunState("generating", "로그인 완료 대기 중");
-  addLog({
-    level: "info",
-    message: `${accountDisplayName(account)} 계정의 브라우저가 열리면 아이디와 비밀번호를 직접 입력해 로그인해 주세요.`,
-    at: new Date().toISOString()
-  });
+const openingAccounts = new Set();
+const checkingAccounts = new Set();
+async function openAccountAndCheck(account) {
+  if(openingAccounts.has(account.id) || checkingAccounts.has(account.id) || account.connection?.busy || (account.connection?.connected && account.sessionStatus==='valid'))return;
+  openingAccounts.add(account.id);renderAccounts();
   try {
-    const result = await window.blogAuto.checkAccountSession(account.id, {
-      includeTistorySession: options.includeTistorySession !== false
-    });
-    const currentAccount = state.accountStore.accounts.find((item) => item.id === account.id);
-    const tistoryValid = !result.tistorySession || result.tistorySession.status === "valid";
-    if (result.tistorySession) {
-      state.tistorySessionStatus = result.tistorySession.status || "unknown";
-      addLog({
-        level: tistoryValid ? "info" : "warn",
-        message: tistoryValid ? "티스토리 세션 확인 완료." : `티스토리 세션 확인 실패: ${result.tistorySession.reason || result.tistorySession.status}`,
-        at: new Date().toISOString()
-      });
-    }
-    if (result.status === "valid") {
-      if (currentAccount) currentAccount.sessionStatus = "valid";
-      renderAccounts();
-      setRunState("generated", "세션 정상");
-      const verifiedAccountId = currentAccount?.id || account.id || "";
-      if (resumeAuto && state.autoRunning && state.autoWaitingSessionAccountId === verifiedAccountId) {
-        addLog({
-          level: "info",
-          message: "현재 대기 중인 계정의 세션확인이 완료되어 자동 작업을 바로 이어갑니다.",
-          at: new Date().toISOString()
-        });
-        signalAutoSessionResume(verifiedAccountId);
-      } else if (resumeAuto && state.autoRunning && state.autoWaitingSessionAccountId) {
-        addLog({
-          level: "info",
-          message: "세션확인은 완료되었지만 현재 대기 중인 계정이 아니므로 대기 작업은 유지합니다.",
-          at: new Date().toISOString()
-        });
-      } else if (startAuto && !state.autoRunning && state.autoPendingSessionTarget?.accountId === verifiedAccountId) {
-        const pending = state.autoPendingSessionTarget;
-        addLog({
-          level: "info",
-          message: `${pending.accountLabel || accountDisplayName(account)} / ${pending.categoryName} 대기 작업을 다시 시작합니다.`,
-          at: new Date().toISOString()
-        });
-        const startKey = pending.key;
-        state.autoPendingSessionTarget = null;
-        window.setTimeout(() => {
-          startAutoPublishing(startKey).catch((error) => {
-            state.running = false;
-            state.autoRunning = false;
-            state.autoPausedForSession = false;
-            state.autoWaitingSessionAccountId = "";
-            state.autoResumeAccountId = "";
-            state.autoPendingSessionTarget = null;
-            addLog({ level: "error", message: error.message, at: new Date().toISOString() });
-            setRunState("failed", "실패");
-          });
-        }, 0);
-      } else {
-        const autoTarget = startAuto && $("#topicMode").value === "auto" ? firstAutoTargetForAccount(verifiedAccountId) : null;
-        if (autoTarget && !state.running && !state.autoRunning) {
-          const startKey = autoTargetKey(autoTarget);
-          addLog({
-            level: "info",
-            message: `${accountDisplayName(autoTarget.account)} / ${autoTarget.category.name} 자동 작업을 바로 시작합니다.`,
-            at: new Date().toISOString()
-          });
-          window.setTimeout(() => {
-            startAutoPublishing(startKey).catch((error) => {
-              state.running = false;
-              state.autoRunning = false;
-              state.autoPausedForSession = false;
-              state.autoWaitingSessionAccountId = "";
-              state.autoResumeAccountId = "";
-    state.autoPendingSessionTarget = null;
-    $("#startButton").disabled = false;
-    setTistoryTestButtonDisabled(false);
-    $("#stopAutoButton").disabled = true;
-              addLog({ level: "error", message: error.message, at: new Date().toISOString() });
-              setRunState("failed", "실패");
-            });
-          }, 0);
-        } else {
-          addLog({
-            level: "info",
-            message: "계정 세션확인이 완료되었습니다. 작업 시작을 누르면 이 세션으로 바로 진행합니다.",
-            at: new Date().toISOString()
-          });
-        }
+    await window.blogAuto.openAccountChrome(account.id);
+    // Chrome may need a few seconds to start the extension heartbeat.
+    for(let attempt=0;attempt<20;attempt++) {
+      const store=await window.blogAuto.getConnections();
+      const current=store.accounts.find(a=>a.id===account.id);
+      if(!current)return;
+      if(current.connection?.connected) {
+        if(!current.connection.busy && current.sessionStatus!=='valid')await checkAccountSession(current);
+        return;
       }
-    } else if (result.status === "expired") {
-      if (currentAccount) currentAccount.sessionStatus = "expired";
-      renderAccounts();
-      setRunState("session_expired", "세션만료");
-    } else {
-      if (currentAccount) currentAccount.sessionStatus = "unknown";
-      renderAccounts();
-      setRunState("failed", "세션 확인 실패");
+      await new Promise(resolve=>setTimeout(resolve,1000));
     }
-  } catch (error) {
-    addLog({ level: "error", message: error.message, at: new Date().toISOString() });
-    setRunState("failed", "세션 확인 실패");
-  }
+    addLog({level:'warn',message:accountDisplayName(account)+': Chrome은 열렸지만 확장 연결이 확인되지 않았습니다. 해당 창에서 확장을 켜거나 ‘확장프로그램 연결’을 진행하세요.',at:new Date().toISOString()});
+  }catch(error){addLog({level:'error',message:error.message,at:new Date().toISOString()});}
+  finally{openingAccounts.delete(account.id);renderAccounts();}
 }
-
-async function checkSelectedAccountSessions() {
-  if (state.running || state.autoRunning) {
-    addLog({ level: "warn", message: "작업 실행 중에는 세션일괄확인을 시작할 수 없습니다.", at: new Date().toISOString() });
-    return;
-  }
-  const button = $("#bulkSessionCheckButton");
-  const accounts = (state.accountStore.accounts || []).filter((account) => account.checked !== false);
-  if (!accounts.length) {
-    addLog({ level: "warn", message: "세션을 확인할 체크된 계정이 없습니다.", at: new Date().toISOString() });
-    return;
-  }
-
-  if (button) button.disabled = true;
-  addLog({ level: "info", message: `체크된 계정 ${accounts.length}개의 세션을 순차 확인합니다.`, at: new Date().toISOString() });
+async function checkAccountSession(account,options={}) {
+  if(!account || checkingAccounts.has(account.id) || account.connection?.busy || (account.connection?.connected && account.sessionStatus==='valid'))return;
+  checkingAccounts.add(account.id);renderAccounts();
   try {
-    const form = collectForm();
-    if (form.publishToTistoryAfterNaver && form.tistoryBlogId) {
-      try {
-        const tistoryResult = await window.blogAuto.checkTistorySession(form.tistoryBlogId);
-        state.tistorySessionStatus = tistoryResult.status || "unknown";
-        addLog({
-          level: tistoryResult.status === "valid" ? "info" : "warn",
-          message: tistoryResult.status === "valid" ? "티스토리 세션 확인 완료." : `티스토리 세션 확인 실패: ${tistoryResult.reason || tistoryResult.status}`,
-          at: new Date().toISOString()
-        });
-      } catch (error) {
-        state.tistorySessionStatus = "expired";
-        addLog({ level: "warn", message: `티스토리 세션 확인 실패: ${error.message}`, at: new Date().toISOString() });
-      }
-    }
-    for (const account of accounts) {
-      addLog({
-        level: "info",
-        message: `${accountDisplayName(account)} 계정 세션 확인을 시작합니다.`,
-        at: new Date().toISOString()
-      });
-      await checkAccountSession(account, { resumeAuto: false, startAuto: false, includeTistorySession: false });
-    }
-    addLog({ level: "info", message: "세션일괄확인이 완료되었습니다.", at: new Date().toISOString() });
-  } finally {
-    if (button) button.disabled = false;
-  }
+    const result=await window.blogAuto.checkAccountSession(account.id,{interactive:options.interactive!==false});
+    account.sessionStatus=result.status; renderAccounts();
+    if(result.status==='valid')signalAutoSessionResume(account.id);
+    if(result.status==='disconnected' && options.interactive!==false) await connectAccount(account);
+    else if(result.status!=='valid') addLog({level:'warn',message:accountDisplayName(account)+': '+(result.reason || result.status),at:new Date().toISOString()});
+  }catch(error){addLog({level:'error',message:error.message,at:new Date().toISOString()});}
+  finally{checkingAccounts.delete(account.id);renderAccounts();}
+}
+async function checkSelectedAccountSessions() {
+  if(state.bulkChecking || state.running || state.autoRunning)return;
+  state.bulkChecking=true;renderAccounts();updateRunControls();$('#startButton').disabled=true;
+  addLog({agent:'main',message:'세션 일괄 확인 시작 · 선택한 네이버 계정과 연결된 티스토리를 확인합니다.'});
+  try {
+    await window.blogAuto.checkAllSessions();
+    state.accountStore=await window.blogAuto.getConnections();
+    addLog({agent:'main',message:'세션 일괄 확인이 끝났습니다. 계정별 결과를 확인하세요.'});
+  } catch(error) {addLog({level:'error',message:error.message});}
+  finally{state.bulkChecking=false;renderAccounts();updateRunControls();$('#startButton').disabled=state.running || state.autoRunning;}
+}
+async function connectAccount(account) {
+  const guide=$('#extensionGuide'); guide.hidden=false;
+  try{const pairing=await window.blogAuto.pairExtension(account.id);$('#pairingCode').textContent=pairing.code;$('#pairingHelp').textContent=accountDisplayName(account)+' 연결 코드가 복사되었습니다. 해당 Chrome의 BlogAuto 확장에 붙여넣으세요. 10분 동안 유효합니다.';}catch(e){$('#pairingHelp').textContent=e.message;}
 }
 
 function showStartupNoticeIfNeeded() {
@@ -592,6 +506,10 @@ function renderHistory(history) {
       ["에이전트별 토큰", agentTokenText],
       ["직접 전달 프롬프트", Number(item.prompt_characters || 0) > 0 ? `${Number(item.prompt_characters).toLocaleString()}자` : ""],
       ["사유", item.reason]
+      ,...[...(item.attempts || [])].map(attempt=>[
+        `전체 시도 ${attempt.attempt}/${item.attempts.length}`,
+        `${attempt.title || '주제 조사'} · ${attempt.status} · ${formatTokens(attempt.tokenUsage?.total || 0)}\n${attempt.reason || '완료'}\n검색어: ${(attempt.queries || []).join(' / ')}`
+      ])
     ].filter(([, value]) => String(value || "").trim());
 
     card.innerHTML = `
@@ -719,7 +637,32 @@ function renderImageNotes(imageNotes) {
   }
 }
 
+function renderTistoryConnection(){
+  const targets=state.accountStore.accounts.filter(a=>a.tistoryBlogId);
+  const panel=$('#tistoryConnectionPanel');if(!panel)return;panel.hidden=!targets.length;
+  const connection=state.accountStore.tistoryConnection || {};
+  $('#tistoryConnectionStatus').textContent=connection.connected?(connection.status==='valid'?'공용 로그인 확인 완료':connection.loginStatus==='valid' && ['unknown','checking'].includes(connection.status)?'공용 로그인 확인됨 · 상태 갱신 중':connection.reason || '로그인 상태 확인 중'):'네이버 계정에 지정된 모든 티스토리 블로그가 한 로그인 공간을 사용합니다.';
+  $('#pairTistoryButton').disabled=Boolean(connection.connected || connection.busy);
+  $('#openTistoryButton').disabled=Boolean(connection.busy);
+  $('#cancelTistoryButton').hidden=!connection.busy;
+  $('#openTistoryButton').onclick=async()=>{
+    try{await window.blogAuto.openTistoryChrome(targets[0].tistoryBlogId);if(connection.connected)await window.blogAuto.checkTistorySession(targets[0].tistoryBlogId);}
+    catch(error){$('#tistoryConnectionStatus').textContent=error.message;}
+  };
+  $('#pairTistoryButton').onclick=async()=>{
+    try{const pairing=await window.blogAuto.pairTistoryExtension(targets[0].tistoryBlogId);$('#pairingCode').textContent=pairing.code;$('#pairingHelp').textContent='티스토리 공용 Chrome의 BlogAuto에 복사된 연결 코드를 붙여넣으세요.';$('#extensionGuide').hidden=false;}
+    catch(error){$('#tistoryConnectionStatus').textContent=error.message;}
+  };
+  $('#cancelTistoryButton').onclick=()=>window.blogAuto.cancelConnectionTask('tistory-shared');
+}
+
 function renderAccounts() {
+  renderTistoryConnection();
+  const bulkCheck=$('#bulkSessionCheckButton');
+  if(bulkCheck){
+    bulkCheck.disabled=state.bulkChecking || state.running || state.autoRunning || !state.accountStore.accounts.some(a=>a.checked!==false);
+    bulkCheck.textContent=state.bulkChecking?'세션 확인 중':'세션 일괄 확인';
+  }
   const list = $("#accountList");
   const manager = $("#accountManager");
   const toggle = $("#toggleAccountManagerButton");
@@ -743,20 +686,25 @@ function renderAccounts() {
     const row = document.createElement("div");
     row.className = `account-row${account.id === state.accountStore.selectedAccountId ? " selected" : ""}`;
     row.dataset.accountId = account.id;
+    const connected=account.connection?.connected===true;
+    const ready=connected && loginDisplayConfirmed(account);
+    const busy=Boolean(account.connection?.busy || openingAccounts.has(account.id) || checkingAccounts.has(account.id));
     row.innerHTML = `
       <button type="button" class="drag-handle account-drag-handle" draggable="true" aria-label="계정 순서 드래그" title="드래그해서 계정 순서 변경">⇅</button>
       <input class="list-check" type="checkbox" ${account.checked !== false ? "checked" : ""} aria-label="자동 발행 계정 선택" />
-      <div class="account-main">
+      <div class="account-main" role="button" tabindex="0" aria-label="${escapeHtml(accountDisplayName(account))} 계정 설정 선택" title="계정명을 누르면 이 계정의 설정과 카테고리를 편집합니다">
         <strong title="${escapeHtml(accountDisplayName(account))}">${escapeHtml(accountDisplayName(account))}</strong>
-        <span>로그인 정보 직접 입력</span>
+        <span>기존 Chrome 로그인 사용</span>
         <small>블로그 ${escapeHtml(account.blogId || account.naverId || "-")}</small>
+        ${account.tistoryBlogId?`<small>티스토리 ${escapeHtml(account.tistoryBlogId)}</small>`:''}
         <small>카테고리 ${(account.categories || []).length}개</small>
       </div>
+      <button type="button" class="ghost small danger-button account-delete" data-action="delete" ${state.running || state.autoRunning || state.bulkChecking?'disabled':''} title="${state.running || state.autoRunning || state.bulkChecking?'작업 종료 후 삭제할 수 있습니다.':'계정 삭제'}">삭제</button>
+      <div class="account-status">${sessionBadge(account)}</div>
       <div class="account-actions">
-        ${sessionBadge(account)}
-        <button type="button" class="ghost small" data-action="session">세션확인</button>
-        <button type="button" class="select-button small" data-action="select">${account.id === state.accountStore.selectedAccountId ? "선택됨" : "선택"}</button>
-        <button type="button" class="ghost small danger-button" data-action="delete">삭제</button>
+        <button type="button" class="ghost small" data-action="open" ${ready || busy?'disabled':''} title="${ready?'로그인 확인이 완료되었습니다.':'계정 Chrome을 열고 로그인 상태를 확인합니다.'}">${openingAccounts.has(account.id)?'연결·로그인 확인 중':'블로그 열기 / 로그인'}</button>
+        <button type="button" class="ghost small extension-connect" data-action="connect" ${connected || account.connection?.busy?'disabled':''} title="${connected?'확장프로그램이 이미 연결되어 있습니다.':'처음 설치하거나 확장을 다시 연결할 때 사용합니다.'}">확장프로그램 연결</button>
+        <button type="button" class="ghost small" data-action="cancel" ${account.connection?.busy?'':'hidden'}>대기 취소</button>
       </div>
     `;
     const dragHandle = row.querySelector(".account-drag-handle");
@@ -799,16 +747,15 @@ function renderAccounts() {
       account.checked = event.target.checked;
       saveAccountStoreNow();
     });
-    row.querySelector("[data-action='select']").addEventListener("click", (event) => {
-      event.stopPropagation();
-      selectAccount(account.id);
+    row.querySelector('.account-main').addEventListener('keydown',event=>{
+      if(event.key==='Enter' || event.key===' '){event.preventDefault();event.stopPropagation();selectAccount(account.id);}
     });
-    row.querySelector("[data-action='session']").addEventListener("click", (event) => {
-      event.stopPropagation();
-      checkAccountSession(account);
-    });
+    row.querySelector('[data-action="open"]').addEventListener('click',event=>{event.stopPropagation();openAccountAndCheck(account);});
+    row.querySelector('[data-action="connect"]').addEventListener('click',event=>{event.stopPropagation();connectAccount(account);});
+    row.querySelector('[data-action="cancel"]').addEventListener('click',async event=>{event.stopPropagation();await window.blogAuto.cancelConnectionTask(account.id);});
     row.querySelector("[data-action='delete']").addEventListener("click", async (event) => {
       event.stopPropagation();
+      if (state.running || state.autoRunning || state.bulkChecking) return;
       const label = accountDisplayName(account);
       if (!window.confirm(`${label} 계정을 삭제할까요? 이 계정에 등록된 카테고리도 함께 삭제됩니다.`)) {
         return;
@@ -859,15 +806,6 @@ function renderCategories() {
   }
 
   for (const [index, category] of account.categories.entries()) {
-    const searchProviders = categorySearchProviders(category);
-    const optionSummary = [
-      category.excludedTopics ? `제외: ${category.excludedTopics}` : "",
-      category.preferredTone ? `톤: ${category.preferredTone}` : "",
-      category.freshnessLevel && category.freshnessLevel !== "auto" ? `최신성: ${category.freshnessLevel}` : "",
-      searchChannelLabel(category.searchChannel),
-      `Provider: ${searchProviders.primarySearchProvider} → ${searchProviders.fallbackSearchProvider}`,
-      category.trustBlogAsSource ? "블로그 신뢰" : ""
-    ].filter(Boolean).join(" · ");
     const row = document.createElement("div");
     row.className = `category-row${state.editingCategoryId === category.id ? " selected" : ""}`;
     row.dataset.categoryId = category.id;
@@ -876,8 +814,6 @@ function renderCategories() {
       <input class="list-check" type="checkbox" ${category.checked !== false ? "checked" : ""} aria-label="자동 발행 카테고리 선택" />
       <div class="category-main">
         <strong>${escapeHtml(category.name)}</strong>
-        <span>${escapeHtml(category.keyword || "검색 키워드 없음")}</span>
-        ${optionSummary ? `<small>${escapeHtml(optionSummary)}</small>` : ""}
       </div>
       <div class="category-actions">
         <button type="button" class="ghost small" data-action="move-up" ${index === 0 ? "disabled" : ""}>위</button>
@@ -958,11 +894,12 @@ function selectAccount(accountId) {
 function fillAccountForm(account) {
   $("#accountLabel").value = account?.label || "";
   $("#blogId").value = account?.blogId || account?.naverId || "";
+  $("#accountTistoryBlogId").value = account?.tistoryBlogId || "";
   renderAccountSampleImage(account);
 }
 
 function accountImageStatusLabel(account) {
-  if (!account?.sampleImagePath) return "Default image style";
+  if (!account?.sampleImagePath) return "기본 이미지 스타일";
   const status = account.imageStylePromptStatus || (account.imageStylePrompt ? "ready" : "missing");
   if (status === "ready") return "Custom style prompt ready";
   if (status === "stale") return "Image changed - prompt will regenerate";
@@ -984,7 +921,7 @@ function renderAccountSampleImage(account = selectedAccount()) {
     preview.appendChild(image);
   } else {
     const empty = document.createElement("span");
-    empty.textContent = "No sample image";
+    empty.textContent = "샘플 없음";
     preview.appendChild(empty);
   }
   status.textContent = accountImageStatusLabel(account);
@@ -1080,6 +1017,15 @@ function firstAutoTargetForAccount(accountId) {
   return getAutoTargets().find((target) => String(target?.account?.id || "") === id) || null;
 }
 
+function readTistoryTargetInput(){
+  const input=$('#accountTistoryBlogId');
+  const id=input.value.trim().toLowerCase().replace(/^https?:\/\//,'').replace(/\.tistory\.com\/?$/,'');
+  if(id && !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(id)){
+    input.setCustomValidity('티스토리 Blog ID 또는 https://블로그ID.tistory.com 주소를 입력하세요.');input.reportValidity();return null;
+  }
+  input.setCustomValidity('');return id;
+}
+
 async function saveAccountStoreNow() {
   state.accountStore = await window.blogAuto.saveAccountStore(state.accountStore);
   renderAccounts();
@@ -1166,9 +1112,10 @@ function collectForm(target = {}) {
   return {
     accountId: account?.id || "",
     blogId: useSelectedAccount ? (account?.blogId || account?.naverId || "") : $("#blogId").value.trim(),
-    topicMode: $("#topicMode").value,
+    topicMode: "auto",
     repeatTermMinutes: Number($("#repeatTermMinutes").value || 60),
-    topic: $("#topic").value.trim(),
+    crossPublish: $("#crossPublish").checked,
+    topic: "",
     category: category?.name || "",
     keyword: category?.keyword || "",
     excludedTopics: category?.excludedTopics || "",
@@ -1184,9 +1131,9 @@ function collectForm(target = {}) {
     naverSearchUrl: DEFAULT_NAVER_SEARCH_URL,
     googleSearchUrl: DEFAULT_GOOGLE_SEARCH_URL,
     naverEditorDomNotes: "",
-    publishAfterGenerate: $("#publishAfterGenerate").checked,
-    publishToTistoryAfterNaver: $("#publishToTistoryAfterNaver")?.checked === true,
-    tistoryBlogId: $("#tistoryBlogId")?.value.trim() || "",
+    publishAfterGenerate: true,
+    publishToTistoryAfterNaver: Boolean(account?.tistoryBlogId),
+    tistoryBlogId: account?.tistoryBlogId || "",
     publishVisibility: $("#publishVisibility").value,
     publishPrivate: $("#publishVisibility").value !== "public",
     publishScheduleMode: $("#publishScheduleMode").value,
@@ -1195,7 +1142,7 @@ function collectForm(target = {}) {
     titleImageAspectRatio: normalizeImageAspectRatio($("#titleImageAspectRatio").value),
     bodyImageAspectRatio: normalizeImageAspectRatio($("#bodyImageAspectRatio").value),
     maxBodyImages: Number($("#maxBodyImages").value),
-    breakSentencesInBody: $("#breakSentencesInBody").checked,
+    breakSentencesInBody: true,
     agentModels: currentAgentModels(),
     excludedKeywordLanes: Array.isArray(target.excludedKeywordLanes) ? target.excludedKeywordLanes : [],
     failOnLoginRequired: target.failOnLoginRequired === true
@@ -1204,8 +1151,6 @@ function collectForm(target = {}) {
 
 function applySettings(settings) {
   const map = {
-    topic: "#topic",
-    topicMode: "#topicMode",
     repeatTermMinutes: "#repeatTermMinutes",
     tistoryBlogId: "#tistoryBlogId",
     publishVisibility: "#publishVisibility",
@@ -1218,13 +1163,12 @@ function applySettings(settings) {
       $(selector).value = settings[key];
     }
   }
-  $("#publishAfterGenerate").checked = settings.publishAfterGenerate === true;
-  if ($("#publishToTistoryAfterNaver")) $("#publishToTistoryAfterNaver").checked = settings.publishToTistoryAfterNaver === true;
+  $("#crossPublish").checked = settings.crossPublish === true;
+  if ($("#publishToTistoryAfterNaver")) $("#publishToTistoryAfterNaver").checked = false;
   state.tistorySessionStatus = settings.tistorySessionStatus || "unknown";
   $("#includeTitleImage").checked = settings.includeTitleImage !== false;
   $("#titleImageAspectRatio").value = normalizeImageAspectRatio(settings.titleImageAspectRatio || settings.imageAspectRatio);
   $("#bodyImageAspectRatio").value = normalizeImageAspectRatio(settings.bodyImageAspectRatio || settings.imageAspectRatio);
-  $("#breakSentencesInBody").checked = settings.breakSentencesInBody !== false;
   if ($("#codexModel")) $("#codexModel").value = normalizeCodexModel(settings.codexModel);
   applyAgentModels(settings.agentModels);
   if (settings.publishPrivate === false) $("#publishVisibility").value = "public";
@@ -1250,6 +1194,7 @@ async function saveSettingsNow() {
     publishPrivate: form.publishPrivate,
     topicMode: form.topicMode,
     repeatTermMinutes: form.repeatTermMinutes,
+    crossPublish: form.crossPublish,
     publishVisibility: form.publishVisibility,
     publishScheduleMode: form.publishScheduleMode,
     reserveAfterHours: form.reserveAfterHours,
@@ -1272,17 +1217,13 @@ function scheduleSettingsSave() {
     saveSettingsNow().catch((error) => {
       $("#settingsState").textContent = "설정 저장 실패";
       addLog({ level: "error", message: error.message, at: new Date().toISOString() });
+      refreshPendingPublishButton();
     });
   }, 450);
 }
 
 function updateModeControls() {
-  const isAuto = $("#topicMode").value === "auto";
   const isPrivatePublish = $("#publishVisibility").value !== "public";
-  $("#repeatTermLabel").style.display = isAuto ? "grid" : "none";
-  $("#manualTopicLabel").style.display = isAuto ? "none" : "grid";
-  $("#publishAfterGenerate").checked = isAuto ? true : $("#publishAfterGenerate").checked;
-  $("#publishAfterGenerate").disabled = isAuto;
   if (isPrivatePublish && $("#publishScheduleMode").value === "reserve") {
     $("#publishScheduleMode").value = "now";
   }
@@ -1291,13 +1232,28 @@ function updateModeControls() {
 }
 
 function getAutoTargets() {
+  const groups = state.accountStore.accounts.filter(account => account.checked !== false)
+    .map(account => (account.categories || [])
+      .filter(category => category.checked !== false && hasCategoryName(category) && hasCategoryKeyword(category))
+      .map(category => ({ account, category })));
+  if (!$("#crossPublish").checked) return groups.flat();
   const targets = [];
-  for (const account of state.accountStore.accounts.filter((item) => item.checked !== false)) {
-    for (const category of (account.categories || []).filter((item) => item.checked !== false && hasCategoryName(item) && hasCategoryKeyword(item))) {
-      targets.push({ account, category });
-    }
+  const rounds = Math.max(0, ...groups.map(group => group.length));
+  for (let index = 0; index < rounds; index++) {
+    for (const group of groups) if (group[index]) targets.push(group[index]);
   }
   return targets;
+}
+
+function updateRunControls() {
+  const busy = state.running || state.autoRunning || state.bulkChecking;
+  const bulkCheck=$('#bulkSessionCheckButton');
+  if(bulkCheck)bulkCheck.disabled=busy || !state.accountStore.accounts.some(a=>a.checked!==false);
+  $("#crossPublish").disabled = busy;
+  document.querySelectorAll('.account-row [data-action="delete"]').forEach(button => {
+    button.disabled = busy;
+    button.title = busy ? '작업 종료 후 삭제할 수 있습니다.' : '계정 삭제';
+  });
 }
 
 function allNaverSessionsExpired(targets) {
@@ -1387,229 +1343,97 @@ function waitForAccountSessionOrTerm(accountId, minutes) {
   });
 }
 
-async function startAutoPublishing(startTargetKey = "") {
-  const checkedTargets = state.accountStore.accounts
-    .filter((account) => account.checked !== false)
-    .flatMap((account) => (account.categories || [])
-      .filter((category) => category.checked !== false)
-      .map((category) => ({ account, category })));
-  if (!checkedTargets.length) {
-    throw new Error("자동 발행할 체크된 계정/카테고리 조합이 없습니다.");
+function progressKey(target){return target.account.id+':'+target.category.id;}
+function renderTargetProgress(){
+  const panel=$('#targetProgress');if(!panel)return;
+  const rows=[];
+  if(state.activeTarget){
+    const current=state.targetProgress?.[progressKey(state.activeTarget)];
+    if(current)rows.push({...current,slot:'현재'});
   }
-  const checkedTargetsWithKeyword = checkedTargets.filter((target) => (
-    hasCategoryName(target.category) && hasCategoryKeyword(target.category)
-  ));
-  if (!checkedTargetsWithKeyword.length) {
-    throw new Error("자동 발행하려면 체크된 카테고리의 카테고리명과 키워드를 먼저 등록하세요.");
-  }
-  if (allNaverSessionsExpired(checkedTargetsWithKeyword)) {
-    throw new Error("All selected Naver sessions are expired. Check at least one Naver session before starting auto publishing.");
-  }
-  const startupForm = collectForm();
-  if (startupForm.publishToTistoryAfterNaver && !startupForm.tistoryBlogId) throw new Error("티스토리 블로그 ID가 필요합니다.");
-  state.running = true;
-  state.autoRunning = true;
-  state.autoPausedForSession = false;
-  $("#startButton").disabled = true;
-  setTistoryTestButtonDisabled(true);
-  $("#stopAutoButton").disabled = false;
-  await saveSettingsNow();
-  setTokenTotal(0);
-
-  let index = startTargetKey ? findAutoTargetIndex(getAutoTargets(), startTargetKey) : 0;
-  autoLoop:
-  while (state.autoRunning) {
-    const targets = getAutoTargets();
-    if (!targets.length) {
-      addLog({
-        level: "warn",
-        message: "체크된 계정 중 자동 발행 가능한 대상이 없습니다.",
-        at: new Date().toISOString()
-      });
-      await delayAuto(Number($("#repeatTermMinutes").value || 60));
-      continue;
-    }
-    if (allNaverSessionsExpired(targets)) {
-      addLog({
-        level: "warn",
-        message: "All selected Naver sessions are expired. Auto publishing stopped.",
-        at: new Date().toISOString()
-      });
-      state.autoRunning = false;
-      break;
-    }
-    index %= targets.length;
-    const target = targets[index];
-    if (target.account.sessionStatus === "expired") {
-      setPendingAutoTarget(target);
-      addLog({
-        level: "warn",
-        message: `${accountDisplayName(target.account)} 계정은 세션만료 상태입니다. ${target.category.name} 작업은 세션확인 또는 반복주기까지 대기합니다.`,
-        at: new Date().toISOString()
-      });
-      state.autoPausedForSession = true;
-      state.autoWaitingSessionAccountId = target.account.id || "";
-      const waitResult = await waitForAccountSessionOrTerm(target.account.id, Number($("#repeatTermMinutes").value || 60));
-      state.autoPausedForSession = false;
-      state.autoWaitingSessionAccountId = "";
-      if (waitResult === "session") {
-        clearPendingAutoTarget(autoTargetKey(target));
-        addLog({
-          level: "info",
-          message: `${accountDisplayName(target.account)} 계정 세션확인이 완료되어 ${target.category.name} 작업을 즉시 재시도합니다.`,
-          at: new Date().toISOString()
-        });
-        continue;
-      }
-      if (waitResult === "term") {
-        clearPendingAutoTarget(autoTargetKey(target));
-        index = nextDifferentAccountIndex(targets, index);
-        continue;
-      }
-      break;
-    }
-    clearPendingAutoTarget(autoTargetKey(target));
-    let autoAttemptLimit = AUTO_TARGET_MAX_ATTEMPTS;
-    let skipDelayBeforeNextTarget = false;
-    const excludedKeywordLanes = new Set();
-    for (let attempt = 1; attempt <= autoAttemptLimit && state.autoRunning; attempt += 1) {
-      addLog({
-        level: "info",
-        message: `자동 Cycle 시작 (${attempt}/${autoAttemptLimit}): ${accountDisplayName(target.account)} / ${target.category.name}`,
-        at: new Date().toISOString()
-      });
-      $("#selectedTitle").textContent = "아직 선정 전";
-      $("#articlePreview").value = "";
-      renderImages([]);
-      renderImageNotes([]);
-      const result = await runAutoStartJob(collectForm({
-        account: target.account,
-        category: target.category,
-        excludedKeywordLanes: [...excludedKeywordLanes],
-        failOnLoginRequired: true
-      }));
-      if (result?.status === "codex_usage_limit") {
-        addLog({
-          level: "error",
-          message: "Codex 사용량 한도 초과로 자동 작업을 중지합니다.",
-          at: new Date().toISOString()
-        });
-        state.autoRunning = false;
-        break autoLoop;
-      }
-      if (result?.status === "codex_exec_failed") {
-        addLog({
-          level: "error",
-          message: `Codex 실행 실패로 자동 작업을 중지합니다: ${autoResultReason(result)}`,
-          at: new Date().toISOString()
-        });
-        state.autoRunning = false;
-        break autoLoop;
-      }
-      if (result?.status === "session_expired") {
-        target.account.sessionStatus = "expired";
-        if (allNaverSessionsExpired(getAutoTargets())) {
-          renderAccounts();
-          addLog({
-            level: "warn",
-            message: "All selected Naver sessions are expired. Auto publishing stopped.",
-            at: new Date().toISOString()
-          });
-          state.autoRunning = false;
-          break autoLoop;
-        }
-        setPendingAutoTarget(target);
-        renderAccounts();
-        addLog({
-          level: "warn",
-          message: `${accountDisplayName(target.account)} 계정은 세션만료 상태입니다. ${target.category.name} 작업은 세션확인 또는 반복주기까지 대기합니다.`,
-          at: new Date().toISOString()
-        });
-        state.autoPausedForSession = true;
-        state.autoWaitingSessionAccountId = target.account.id || "";
-        const waitResult = await waitForAccountSessionOrTerm(target.account.id, Number($("#repeatTermMinutes").value || 60));
-        state.autoPausedForSession = false;
-        state.autoWaitingSessionAccountId = "";
-        if (waitResult === "session") {
-          clearPendingAutoTarget(autoTargetKey(target));
-          addLog({
-            level: "info",
-            message: `${accountDisplayName(target.account)} 계정 세션확인이 완료되어 ${target.category.name} 작업을 즉시 재시도합니다.`,
-            at: new Date().toISOString()
-          });
-          continue autoLoop;
-        }
-        if (waitResult === "term") {
-          clearPendingAutoTarget(autoTargetKey(target));
-          index = nextDifferentAccountIndex(targets, index);
-          continue autoLoop;
-        }
-        break autoLoop;
-      }
-      if (!shouldRetryAutoResult(result)) {
-        break;
-      }
-      const failedLanes = keywordLanePhrasesFromResult(result);
-      for (const lane of failedLanes) excludedKeywordLanes.add(lane);
-      autoAttemptLimit = Math.min(autoAttemptLimit, autoAttemptLimitForResult(result));
-      if (attempt < autoAttemptLimit) {
-        addLog({
-          level: "warn",
-          message: `자동 Cycle 실패, 같은 대상으로 재시도합니다 (${attempt + 1}/${autoAttemptLimit}): ${autoResultReason(result)}${failedLanes.length ? ` / 제외 lane: ${failedLanes.join(", ")}` : ""}`,
-          at: new Date().toISOString()
-        });
-        continue;
-      }
-      addLog({
-        level: "warn",
-        message: `자동 Cycle ${autoAttemptLimit}회 실패로 다음 대상으로 이동합니다: ${autoResultReason(result)}`,
-        at: new Date().toISOString()
-      });
-      skipDelayBeforeNextTarget = true;
-    }
-    index += 1;
-    if (state.autoRunning && !skipDelayBeforeNextTarget) {
-      await delayAuto(Number($("#repeatTermMinutes").value || 60));
-    }
-  }
-
-  state.autoRunning = false;
-  state.autoPausedForSession = false;
-  state.autoWaitingSessionAccountId = "";
-  state.autoResumeAccountId = "";
-  state.autoPendingSessionTarget = null;
-  state.running = false;
-  $("#startButton").disabled = false;
-  setTistoryTestButtonDisabled(false);
-  $("#stopAutoButton").disabled = true;
-  setRunState("generated", "자동 중지");
+  if(state.autoRunning && state.nextTarget)rows.push({account:accountDisplayName(state.nextTarget.account),category:state.nextTarget.category.name,status:'대기',slot:'다음',detail:''});
+  panel.hidden=!rows.length;
+  panel.innerHTML='<div class="target-progress-head"><strong>계정 · 카테고리 작업 현황</strong></div>'+rows.map(row=>'<div class="target-progress-row"><span><b>'+row.slot+'</b> · '+escapeHtml(row.account)+'</span><span>'+escapeHtml(row.category)+'</span><span class="badge '+(row.status==='완료'?'success':row.status==='진행 중'?'info':'warning')+'">'+escapeHtml(row.status)+'</span><small title="'+escapeHtml(row.detail || '')+'">'+escapeHtml(row.detail || '')+'</small></div>').join('');
 }
-
-async function startManualJob() {
-  const form = collectForm();
-  if (form.publishAfterGenerate && form.publishToTistoryAfterNaver && !form.tistoryBlogId) throw new Error("티스토리 블로그 ID가 필요합니다.");
-  if (!form.topic) throw new Error("수동 방식에서는 주제가 필요합니다.");
-  if (!form.category) throw new Error("선택 계정에서 카테고리를 체크하세요.");
-  if (!form.keyword) throw new Error("선택한 카테고리에 검색 키워드를 등록하세요.");
-  if (form.publishAfterGenerate && !form.blogId) throw new Error("발행까지 진행하려면 Blog ID가 등록된 계정을 선택하세요.");
-  state.running = true;
-  $("#startButton").disabled = true;
-  setTistoryTestButtonDisabled(true);
-  await saveSettingsNow();
-  setTokenTotal(0);
-  $("#articlePreview").value = "";
-  $("#selectedTitle").textContent = "아직 선정 전";
-  renderImages([]);
-  renderImageNotes([]);
-  setRunState("generating", "생성 준비");
-  try {
-    await window.blogAuto.startJob(form);
-  } finally {
-    if (!state.autoRunning) {
-      state.running = false;
-      $("#startButton").disabled = false;
-      setTistoryTestButtonDisabled(false);
+function setTargetProgress(target,status,detail=''){
+  state.targetProgress ||= {};
+  state.targetProgress[progressKey(target)]={account:accountDisplayName(target.account),category:target.category.name,status,detail};
+  renderTargetProgress();
+}
+function resetJobPreview(target){
+  state.currentJobId='';
+  $('#articlePreview').value='';$('#selectedTitle').textContent='주제 선정 중';
+  $('#articleMeta').textContent=accountDisplayName(target.account)+' · '+target.category.name+' · 새 작업 시작';
+  renderImages([]);renderImageNotes([]);clearAgentLogs();
+}
+function autoResultAction(result){
+  if(result?.status==='session_expired')return 'login';
+  if(['success','generated','duplicate_retry'].includes(result?.status))return 'next';
+  if(result?.status==='failed' && result.failureKind==='quality')return 'next';
+  return 'stop';
+}
+async function startAutoPublishing(startTargetKey = '') {
+  if(!getAutoTargets().length)throw new Error('계정과 카테고리·키워드를 등록하고 자동 발행할 대상을 체크하세요.');
+  const pending=await window.blogAuto.getPendingPublishState();
+  if(pending.target){
+    const target=getAutoTargets().find(item=>item.account.id===pending.target.accountId && String(item.account.blogId || item.account.naverId || '')===pending.target.blogId && item.category.name===pending.target.category);
+    if(!target)throw new Error('중단된 작업의 계정·카테고리를 선택해 주세요. 대상이 변경되었다면 기존 작업 취소 버튼을 눌러 취소하세요.');
+    startTargetKey=autoTargetKey(target);
+  }
+  state.running=true;state.autoRunning=true;
+  state.targetProgress={};
+  $('#startButton').disabled=true;updateRunControls();$('#stopAutoButton').disabled=false;
+  await saveSettingsNow();setTokenTotal(0);
+  addLog({agent:"main",message:$("#crossPublish").checked?"교차발행 시작 · 각 계정의 선택 카테고리를 한 개씩 번갈아 진행합니다.":"순차발행 시작 · 한 계정의 선택 카테고리를 마친 뒤 다음 계정으로 이동합니다."});
+  let index=startTargetKey?findAutoTargetIndex(getAutoTargets(),startTargetKey):0;
+  try{
+    while(state.autoRunning){
+      const targets=getAutoTargets();if(!targets.length)break;
+      index%=targets.length;const target=targets[index];
+      state.activeTarget=target;
+      state.nextTarget=targets[(index+1)%targets.length];
+      resetJobPreview(target);
+      setTargetProgress(target,'진행 중');
+      addLog({agent:'main',message:accountDisplayName(target.account)+' · '+target.category.name+' 작업 시작'});
+      const result=await runAutoStartJob(collectForm({account:target.account,category:target.category,failOnLoginRequired:true}));
+      setTargetProgress(target,result?.status==='success'?'완료':result?.status==='session_expired'?'로그인 대기':result?.status==='publish_uncertain'?'발행 확인 필요':'실패',result?.reason || '');
+      if(autoResultAction(result)==='stop'){
+        state.autoRunning=false;state.nextTarget=null;
+        const reason=result?.reason || '실행 오류를 확인해 주세요.';
+        setTargetProgress(target,'오류 · 자동 중지',reason);
+        setRunState('failed','오류로 자동 중지 · 확인 후 작업 시작');
+        addLog({agent:'main',level:'error',message:reason+' · 자동 진행을 중지했습니다. 문제 해결 후 작업 시작을 눌러 주세요.'});break;
+      }
+      if(result?.status==='session_expired'){
+        state.autoPausedForSession=true;state.autoWaitingSessionAccountId=target.account.id;
+        setRunState('waiting_login',accountDisplayName(target.account)+' · 연결 및 로그인 대기');
+        while(state.autoRunning){
+          const store=await window.blogAuto.getConnections();const account=store.accounts.find(a=>a.id===target.account.id);
+          if(!account)break;
+          if(account.sessionStatus==='valid')break;
+          await new Promise(resolve=>window.setTimeout(resolve,2000));
+        }
+        state.autoPausedForSession=false;state.autoWaitingSessionAccountId='';
+        continue;
+      }
+      index++;
+      state.nextTarget=targets[index%targets.length];renderTargetProgress();
+      // Rejected content advances immediately within this round. At the end of
+      // the round retain the interval so all-rejected queues cannot spin forever.
+      const rejected=result?.failureKind==='quality' || result?.status==='duplicate_retry';
+      if(state.autoRunning && (!rejected || index%targets.length===0))await delayAuto(Number($('#repeatTermMinutes').value || 60));
     }
+  }catch(error){
+    state.autoRunning=false;state.nextTarget=null;
+    if(state.activeTarget)setTargetProgress(state.activeTarget,'오류 · 자동 중지',error.message);
+    setRunState('failed','오류로 자동 중지 · 확인 후 작업 시작');
+    addLog({agent:'main',level:'error',message:error.message+' · 자동 진행을 중지했습니다. 문제 해결 후 작업 시작을 눌러 주세요.'});
+  }finally{
+    state.autoRunning=false;state.running=false;state.autoPausedForSession=false;
+    state.autoWaitingSessionAccountId='';state.autoResumeAccountId='';state.autoPendingSessionTarget=null;
+    if(state.activeTarget && state.targetProgress?.[progressKey(state.activeTarget)]?.status==='진행 중')setTargetProgress(state.activeTarget,'중지');
+    state.nextTarget=null;renderTargetProgress();
+    $('#startButton').disabled=false;updateRunControls();$('#stopAutoButton').disabled=true;
   }
 }
 
@@ -1617,7 +1441,7 @@ async function startTistoryTestPublish() {
   const form = collectForm();
   if (!form.tistoryBlogId) throw new Error("티스토리 블로그 ID가 필요합니다.");
   state.running = true;
-  $("#startButton").disabled = true;
+  $("#startButton").disabled = true;updateRunControls();
   setTistoryTestButtonDisabled(true);
   await saveSettingsNow();
   setTokenTotal(0);
@@ -1639,7 +1463,7 @@ async function startTistoryTestPublish() {
   } finally {
     if (!state.autoRunning) {
       state.running = false;
-      $("#startButton").disabled = false;
+      $("#startButton").disabled = false;updateRunControls();
       setTistoryTestButtonDisabled(false);
     }
   }
@@ -1658,21 +1482,38 @@ async function boot() {
   const account = selectedAccount();
   if (account) selectAccount(account.id);
   renderHistory(initial.history || []);
+  if(initial.pendingPreview){
+    const draft=initial.pendingPreview;
+    $('#articlePreview').value=draft.article || '';$('#selectedTitle').textContent=draft.title || '';
+    $('#articleMeta').textContent=draft.status==='publish_uncertain'?'이전 발행 결과 확인 필요':'저장된 글 복구됨 · 같은 계정·카테고리에서 작업 시작 시 생성 없이 발행 재시도';
+    renderImages(draft.images || []);
+  }
+  await refreshPendingPublishButton();
+  $('#cancelPendingJobButton').addEventListener('click',async()=>{
+    const button=$('#cancelPendingJobButton');button.dataset.cancelling='true';button.disabled=true;
+    try{
+      const result=await window.blogAuto.cancelPendingPublish();
+      state.autoRunning=false;state.autoDelayWake?.();
+      $('#articleMeta').textContent='기존 작업 취소됨 · 새 작업을 시작할 수 있습니다.';
+      setRunState('idle','대기');
+      addLog({level:'info',message:result.cancelled?'기존 작업을 취소했습니다. 보류 원고와 불확실 상태를 해제했습니다. 기록과 파일은 보존됩니다.':'취소할 기존 작업이 없습니다.',at:new Date().toISOString()});
+    }catch(error){addLog({level:'error',message:error.message,at:new Date().toISOString()});}
+    finally{delete button.dataset.cancelling;await refreshPendingPublishButton();}
+  });
+  if(initial.bridgeError){$('#sessionNotice').hidden=false;$('#sessionNoticeText').textContent=initial.bridgeError;}
 
   window.blogAuto.onAccountsUpdate((store) => {
     state.accountStore = store;
+    for(const account of store.accounts)if(account.sessionStatus==='valid')signalAutoSessionResume(account.id);
     renderAccounts();
-    fillAccountForm(selectedAccount());
-    const editingCategory = findCategoryById(selectedAccount(), state.editingCategoryId);
-    if (editingCategory) {
-      fillCategoryForm(editingCategory);
-      setCategoryButtonLabel();
-    }
+
   });
   window.blogAuto.onLog(addLog);
   window.blogAuto.onStatus((payload) => {
+    if(state.activeTarget)setTargetProgress(state.activeTarget,'진행 중',payload.detail || payload.status);
     state.currentJobId = payload.jobId;
     setRunState(payload.status, payload.detail || payload.status);
+    refreshPendingPublishButton();
   });
   window.blogAuto.onTokens((payload) => {
     setTokenTotal(payload.total || 0);
@@ -1680,7 +1521,11 @@ async function boot() {
   });
   window.blogAuto.onPreview((payload) => {
     $("#articlePreview").value = payload.article || "";
-    $("#articleMeta").textContent = payload.title || "본문 생성 완료";
+    $("#articleMeta").textContent = payload.previewStage === 'humanizing'
+      ? `본문 ${payload.writerAttempt}차 작성 완료 · 문장 다듬는 중`
+      : payload.previewStage === 'reviewing'
+      ? `본문 ${payload.writerAttempt}차 작성 완료 · 검수 중`
+      : payload.previewStage === 'approved' ? '본문 검수 통과 · 후속 작업 준비 중' : payload.title || "본문 생성 완료";
     if (payload.title) $("#selectedTitle").textContent = payload.title;
     if (payload.tokenUsage) setTokenTotal(payload.tokenUsage.total || 0);
     if (payload.tokenUsage?.rateLimits) setCodexRateLimits(payload.tokenUsage.rateLimits);
@@ -1694,7 +1539,7 @@ async function boot() {
   window.blogAuto.onComplete((payload) => {
     if (!state.autoRunning) {
       state.running = false;
-      $("#startButton").disabled = false;
+      $("#startButton").disabled = false;updateRunControls();
       setTistoryTestButtonDisabled(false);
     }
     setRunState(payload.status, payload.status);
@@ -1706,17 +1551,15 @@ async function boot() {
     renderImages(payload.images || []);
     renderImageNotes(payload.imageNotes || []);
     renderHistory(payload.history || []);
+    refreshPendingPublishButton();
+    if(payload.status==='publish_uncertain')addLog({level:'warn',message:"게시글·예약 목록을 확인한 뒤 본문 오른쪽 상단의 ‘기존 작업 취소’ 버튼을 눌러 해제하세요."});
   });
 
   $("#jobForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     if (state.running) return;
     try {
-      if ($("#topicMode").value === "auto") {
-        await startAutoPublishing();
-      } else {
-        await startManualJob();
-      }
+      await startAutoPublishing();
     } catch (error) {
       state.running = false;
       state.autoRunning = false;
@@ -1724,21 +1567,22 @@ async function boot() {
       state.autoWaitingSessionAccountId = "";
       state.autoResumeAccountId = "";
       state.autoPendingSessionTarget = null;
-      $("#startButton").disabled = false;
+      $("#startButton").disabled = false;updateRunControls();
       $("#stopAutoButton").disabled = true;
       setRunState("failed", "실패");
+      refreshPendingPublishButton();
       addLog({ level: "error", message: error.message, at: new Date().toISOString() });
     }
   });
 
   $("#tistoryTestButton")?.addEventListener("click", async () => {
-    if (state.running || state.autoRunning) return;
+    if (state.running || state.autoRunning || state.bulkChecking) return;
     try {
       await startTistoryTestPublish();
     } catch (error) {
       state.running = false;
       state.autoRunning = false;
-      $("#startButton").disabled = false;
+      $("#startButton").disabled = false;updateRunControls();
       setTistoryTestButtonDisabled(false);
       $("#stopAutoButton").disabled = true;
       setRunState("failed", "티스토리 테스트 실패");
@@ -1747,6 +1591,7 @@ async function boot() {
   });
 
   $("#addAccountButton").addEventListener("click", async () => {
+    const tistoryBlogId=readTistoryTargetInput();if(tistoryBlogId===null)return;
     const blogId = $("#blogId").value.trim();
     if (!blogId) {
       addLog({ level: "error", message: "Blog ID를 입력하세요.", at: new Date().toISOString() });
@@ -1761,6 +1606,7 @@ async function boot() {
       id: makeId("acct"),
       label: $("#accountLabel").value.trim() || blogId,
       blogId,
+      tistoryBlogId,
       sampleImagePath: "",
       sampleImageHash: "",
       sampleImageUpdatedAt: "",
@@ -1783,6 +1629,7 @@ async function boot() {
   });
 
   $("#updateAccountButton").addEventListener("click", async () => {
+    const tistoryBlogId=readTistoryTargetInput();if(tistoryBlogId===null)return;
     const account = selectedAccount();
     if (!account) {
       addLog({ level: "error", message: "수정할 계정을 먼저 선택하세요.", at: new Date().toISOString() });
@@ -1798,6 +1645,7 @@ async function boot() {
       addLog({ level: "error", message: "다른 계정에 이미 등록된 Blog ID입니다.", at: new Date().toISOString() });
       return;
     }
+    account.tistoryBlogId = tistoryBlogId;
     account.label = $("#accountLabel").value.trim() || blogId;
     account.blogId = blogId;
     await saveAccountStoreNow();
@@ -1838,10 +1686,6 @@ async function boot() {
     renderAccounts();
   });
 
-  const legacyCheckSessionButton = $("#checkSessionButton");
-  if (legacyCheckSessionButton) {
-    legacyCheckSessionButton.addEventListener("click", () => checkAccountSession(selectedAccount()));
-  }
   $("#bulkSessionCheckButton").addEventListener("click", checkSelectedAccountSessions);
 
   $("#toggleCategoryManagerButton").addEventListener("click", () => {
@@ -1997,7 +1841,6 @@ async function boot() {
       });
     });
   }
-  $("#topicMode").addEventListener("change", updateModeControls);
   $("#publishVisibility").addEventListener("change", updateModeControls);
   $("#publishScheduleMode").addEventListener("change", updateModeControls);
   $("#jobForm").querySelectorAll("input, select, textarea").forEach((control) => {
@@ -2024,4 +1867,60 @@ async function boot() {
 
 boot().catch((error) => {
   addLog({ level: "error", message: error.message, at: new Date().toISOString() });
+});
+
+// Theme and connection controls stay on the workspace; no navigation menu.
+const applyTheme=theme=>{document.documentElement.dataset.theme=theme;$('#themeToggle').textContent=theme==='dark'?'라이트 모드':'다크 모드';$('#themeToggle').setAttribute('aria-pressed',String(theme==='light'));localStorage.setItem('blogauto-theme',theme);window.blogAuto.setWindowTheme(theme).catch(console.error);};
+applyTheme(localStorage.getItem('blogauto-theme')==='light'?'light':'dark');
+$('#themeToggle').onclick=()=>applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark');
+$('#extensionSetup').onclick=()=>{$('#extensionGuide').hidden=false;};
+$('#closeExtensionGuide').onclick=()=>{$('#extensionGuide').hidden=true;};
+$('#prepareExtensionFolder').onclick=async()=>{try{const result=await window.blogAuto.prepareExtension();$('#extensionFolder').textContent=result.folder+' · 경로 복사 완료';}catch(e){$('#extensionFolder').textContent=e.message;}};
+$('#copyExtensionsUrl').onclick=()=>window.blogAuto.copyExtensionsUrl();
+setInterval(async()=>{try{const store=await window.blogAuto.getConnections();
+  state.accountStore.tistoryConnection=store.tistoryConnection;
+  for(const account of store.accounts){const previous=state.accountStore.accounts.find(a=>a.id===account.id);if(previous){const changed=previous.sessionStatus!==account.sessionStatus;previous.sessionStatus=account.sessionStatus;previous.sessionCheckedAt=account.sessionCheckedAt;previous.connection=account.connection;if(changed&&account.sessionStatus==='valid')signalAutoSessionResume(account.id);}}
+  renderAccounts();
+}catch{}},10000);
+// Keep the settings footer within the visible window, including connection notices.
+function fitSettingsPanel() {
+  const panel=document.querySelector('.input-panel');
+  if(innerWidth<=760){panel.style.maxHeight='';return;}
+  panel.style.maxHeight=Math.max(240,innerHeight-Math.max(56,panel.getBoundingClientRect().top)-16)+'px';
+}
+let settingsFrame;
+function queueSettingsFit(){cancelAnimationFrame(settingsFrame);settingsFrame=requestAnimationFrame(fitSettingsPanel);}
+window.addEventListener('resize',queueSettingsFit);
+window.addEventListener('scroll',queueSettingsFit,{passive:true});
+const settingsLayoutObserver=new ResizeObserver(fitSettingsPanel);
+settingsLayoutObserver.observe(document.querySelector('.topbar'));
+settingsLayoutObserver.observe(document.querySelector('.session-notice'));
+fitSettingsPanel();
+
+document.documentElement.dataset.platform=window.blogAuto.platform;
+
+window.blogAuto.onModelError(payload=>{
+  const layer=$('#modelErrorLayer'), select=$('#retryCodexModel');
+  select.innerHTML=$('#codexModel').innerHTML;
+  select.value=payload.model || '';
+  $('#modelErrorMessage').textContent=payload.code==='CODEX_USAGE_LIMIT'
+    ? 'Codex가 사용 한도 오류를 반환했습니다. 오류 상세를 확인하고 재시도를 선택해 주세요.'
+    : '현재 해당 모델의 서버 응답이 늦거나 요청을 처리하지 못했습니다. 모델을 바꿔서 재시도하시기 바랍니다.';
+  $('#modelErrorDetail').textContent=payload.detail;
+  layer.hidden=false;
+  const respond=async(action,model)=>{
+    const buttons=layer.querySelectorAll('button');buttons.forEach(b=>b.disabled=true);
+    try {
+      if(await window.blogAuto.respondModelError({id:payload.id,action,model})){
+        if(action==='retry')$('#codexModel').value=model || '';
+        else {state.autoRunning=false;}
+        layer.hidden=true;
+      }
+    }catch(error){$('#modelErrorMessage').textContent=error.message;}
+    finally{buttons.forEach(b=>b.disabled=false);}
+  };
+  $('#retrySameModel').onclick=()=>respond('retry',payload.model);
+  $('#retryChangedModel').onclick=()=>respond('retry',select.value);
+  $('#cancelModelRetry').onclick=()=>respond('cancel');
+  $('#retrySameModel').focus();
 });

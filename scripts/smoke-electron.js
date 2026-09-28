@@ -1,364 +1,172 @@
-const { _electron: electron } = require("playwright-core");
-const electronExecutable = require("electron");
-const fs = require("node:fs");
-const path = require("node:path");
+// Tests our Electron UI only. Does not launch/control Chrome or contact Naver.
+const {app,BrowserWindow}=require('electron');
+const fs=require('node:fs');const path=require('node:path');const assert=require('node:assert/strict');
+const root=path.resolve(__dirname,'../.test-runtime',`ui-${Date.now()}`);
+process.env.BLOGAUTO_RUNTIME_ROOT=root;process.env.BLOGAUTO_USER_DATA=path.join(root,'app-data');
+process.env.BLOGAUTO_SKIP_CODEX_USAGE_REFRESH='1';
+process.env.BLOGAUTO_TEST_BRIDGE_PORT='0';
+const errors=[];
+app.on('web-contents-created',(_event,contents)=>{
+ contents.setBackgroundThrottling(false);
+ contents.on('console-message',(_event,details)=>{if(details.level==='error')errors.push(details.message);});
+ contents.once('did-finish-load',async()=>{
+  try{
+   await new Promise(r=>setTimeout(r,800));
+   const result=await contents.executeJavaScript(`(async()=>{
+    const initial=await window.blogAuto.getInitialData();
+    document.querySelector('#startupNotice').hidden=true;
+    state.accountStore={accounts:[{id:'ui-account',label:'테스트 계정',blogId:'ui-fixture',categories:[],sessionStatus:'unknown',connection:{connected:true,busy:false}}],selectedAccountId:'ui-account'};renderAccounts();
+    const remove=document.querySelector('.account-delete');
+    if(remove.closest('.account-actions') || remove.getBoundingClientRect().height!==26)throw new Error('삭제 버튼 위치/높이 오류');
+    if(Math.abs(remove.getBoundingClientRect().top-document.querySelector('.account-main').getBoundingClientRect().top)>1)throw new Error('계정명과 삭제 버튼 정렬 오류');
+    state.running=true;updateRunControls();
+    if(!remove.disabled || !document.querySelector('#crossPublish').disabled)throw new Error('작업 중 삭제/순서 변경 가능');
+    state.running=false;state.autoRunning=true;updateRunControls();
+    if(!remove.disabled)throw new Error('자동 발행 대기 중 삭제 가능');
+    state.autoRunning=false;updateRunControls();
+    if(remove.disabled)throw new Error('작업 종료 후 삭제 불가');
+    document.querySelector('#crossPublish').checked=true;
+    await saveSettingsNow();
+    const crossSaved=await window.blogAuto.getInitialData();
+    applySettings(crossSaved.settings);
+    if(!document.querySelector('#crossPublish').checked)throw new Error('교차발행 저장/복원 실패');
+    const cancel=document.querySelector('#cancelPendingJobButton');
+    await refreshPendingPublishButton();if(!cancel.disabled)throw new Error('원고 없이 취소 버튼 활성화');
+    await window.blogAuto.saveSettings({pendingNaverPublishDraft:{jobId:'ui-draft',status:'publish_uncertain',title:'취소 테스트',article:'보존할 원고'}});
+    await refreshPendingPublishButton();if(cancel.disabled)throw new Error('보류 원고 취소 버튼 비활성화');
+    const head=cancel.closest('.panel-head').getBoundingClientRect(),cancelRect=cancel.getBoundingClientRect();
+    if(Math.abs(head.right-cancelRect.right)>2 || cancelRect.height!==32)throw new Error('취소 버튼 위치/높이 불일치');
+    cancel.click();
+    for(let i=0;i<20 && cancel.dataset.cancelling;i++)await new Promise(r=>setTimeout(r,20));
+    if(!cancel.disabled || (await window.blogAuto.getPendingPublishState()).available)throw new Error('보류 원고 취소 실패');
+    if(!document.querySelector('#articleMeta').textContent.includes('취소됨'))throw new Error('취소 상태 안내 누락');
+    if(document.querySelector('.brand'))throw new Error('중복 브랜드');
+    if(!document.querySelector('.titlebar').textContent.includes('네이버 블로그 자동화'))throw new Error('타이틀바 누락');
+    const buttons=[...document.querySelectorAll('.account-row .account-actions button:not([hidden])')].map(el=>el.getBoundingClientRect());
+    if(buttons.some(b=>b.height!==32 || Math.abs(b.width-buttons[0].width)>1))throw new Error('계정 버튼 크기 불일치');
+    document.querySelector('#selectedTitle').textContent='계정별 로그인과 글쓰기를 한곳에서';
+    document.querySelector('#articlePreview').value='생성한 본문을 넓은 작업 공간에서 확인할 수 있습니다.\\n\\n계정별 로그인 상태를 확인하고, 사용자가 직접 로그인하면 대기 중인 작업을 이어갑니다.\\n\\n본문과 사진은 네이버 편집기에 확장프로그램이 입력합니다.';
+    const box=document.querySelector('#articlePreview').getBoundingClientRect();
+    const models=document.querySelector('.agent-model-toolbar').getBoundingClientRect(),actions=document.querySelector('.header-actions').getBoundingClientRect();
+    if(models.right>actions.left || models.top>actions.bottom || actions.top>models.bottom)throw new Error('넓은 창에서 헤더가 한 줄로 정렬되지 않았습니다.');
+    if(getComputedStyle(document.querySelector('#articlePreview'),'::placeholder').fontSize!=='13px')throw new Error('본문 안내 글자 크기 불일치');
+    if(document.querySelector('.logs-panel').getBoundingClientRect().bottom>document.querySelector('.preview-panel').getBoundingClientRect().top)throw new Error('진행 로그가 본문 위에 배치되지 않았습니다.');
+    const publishDefault=collectForm().publishAfterGenerate;
+    if(document.querySelector('#topicMode') || document.querySelector('#topic') || document.querySelector('#publishAfterGenerate'))throw new Error('수동/생성 전용 제어가 남아 있습니다.');
+    if(collectForm().topicMode!=='auto' || collectForm().topic!=='')throw new Error('자동 발행 고정 실패');
+    if(document.querySelector('#breakSentencesInBody') || collectForm().breakSentencesInBody!==true)throw new Error('문장 줄바꿈 고정 실패');
+    const ratio=document.querySelector('#titleImageAspectRatio');ratio.value='3:4';
+    const bodyRatio=document.querySelector('#bodyImageAspectRatio');bodyRatio.value='3:4';
+    const saved=await window.blogAuto.saveSettings({titleImageAspectRatio:ratio.value,bodyImageAspectRatio:bodyRatio.value});
+    if(saved.bodyImageAspectRatio!=='3:4')throw new Error('본문 이미지 비율 저장 실패');
+    return {theme:document.documentElement.dataset.theme,width:box.width,height:box.height,api:Boolean(initial.runtimeRoot),bridgeError:initial.bridgeError,publishDefault,ratio:saved.titleImageAspectRatio};
+   })()`);
+   assert.equal(result.theme,'dark');assert.equal(result.api,true);assert.equal(result.bridgeError,'');assert.ok(result.width>600);assert.ok(result.height>400);
+   assert.equal(result.publishDefault,true);assert.equal(result.ratio,'3:4');
+   contents.send('job:preview',{title:'미리보기 테스트',article:'이미지 전에 표시할 본문',previewStage:'reviewing',writerAttempt:1,images:[]});
+   await new Promise(r=>setTimeout(r,50));
+   assert.deepEqual(await contents.executeJavaScript(`({article:document.querySelector('#articlePreview').value,reviewing:document.querySelector('#articleMeta').textContent.includes('검수 중')})`),{article:'이미지 전에 표시할 본문',reviewing:true});
+   contents.send('job:preview',{title:'미리보기 테스트',article:'보완된 본문',previewStage:'approved',images:[]});
+   await new Promise(r=>setTimeout(r,50));
+   assert.equal(await contents.executeJavaScript(`document.querySelector('#articlePreview').value`),'보완된 본문');
+   await contents.executeJavaScript(`(()=>{for(const agent of ['main','research','writer','image']){addLog({agent,message:'프롬프트 크기: 100자'});addLog({agent,message:'토큰 사용량: 100 tokens'});}if([...document.querySelectorAll('.log-line')].some(e=>/프롬프트 크기|토큰 사용량/.test(e.textContent)))throw new Error('사용량 로그 노출');})()`);
+   const capture=async()=>{await new Promise(r=>setTimeout(r,200));return contents.capturePage(undefined,{stayHidden:true,stayAwake:true});};
+   const artifacts=path.resolve(__dirname,'../artifacts');fs.mkdirSync(artifacts,{recursive:true});
+   await contents.executeJavaScript(`(()=>{
+    const a={account:{id:'a',label:'첫 번째 계정'},category:{id:'c1',name:'중장년 취업지원'}};
+    const b={account:{id:'b',label:'두 번째 계정'},category:{id:'c2',name:'여행의 발견'}};
+    document.querySelector('#articlePreview').value='이전 본문';document.querySelector('#selectedTitle').textContent='이전 제목';
+    resetJobPreview(b);
+    if(document.querySelector('#articlePreview').value || document.querySelector('#selectedTitle').textContent==='이전 제목')throw new Error('새 작업 초기화 실패');
+    state.autoRunning=true;state.activeTarget=b;state.nextTarget=a;setTargetProgress(a,'완료');setTargetProgress(b,'진행 중','주제 조사');
+    const c={account:a.account,category:{id:'c3',name:'소상공인 지원'}};setTargetProgress(c,'대기');
+    const text=document.querySelector('#targetProgress').textContent;
+    for(const expected of ['첫 번째 계정','두 번째 계정','중장년 취업지원','여행의 발견','현재','다음','진행 중','대기'])if(!text.includes(expected))throw new Error('작업 현황 누락: '+expected);
+    if(document.querySelectorAll('.target-progress-row').length!==2 || text.includes('소상공인 지원'))throw new Error('현재·다음 이외의 작업 노출');
+    state.activeTarget=a;state.nextTarget=c;setTargetProgress(a,'진행 중');
+    if(document.querySelector('#targetProgress').textContent.includes('여행의 발견') || !document.querySelector('#targetProgress').textContent.includes('소상공인 지원'))throw new Error('다음 작업 전환 실패');
+    if(!sessionBadge({sessionStatus:'unknown',connection:{connected:true,loginStatus:'valid'}}).includes('로그인 확인됨'))throw new Error('로그인 표시 회귀');
+    state.autoRunning=false;
+   })()`);
+   fs.writeFileSync(path.join(artifacts,'ui-target-progress.png'),(await capture()).toPNG());
+   contents.send('job:modelError',{id:'ui-model-error',model:'gpt-5.6-sol',code:'CODEX_EXEC_FAILED',detail:'Selected model is at capacity.'});
+   await new Promise(r=>setTimeout(r,100));
+   await contents.executeJavaScript(`(()=>{
+    if(document.querySelector('#modelErrorLayer').hidden)throw new Error('모델 오류 팝업 누락');
+    if(document.querySelector('#retryCodexModel').value!=='gpt-5.6-sol')throw new Error('실패 모델 표시 오류');
+    for(const id of ['retrySameModel','retryChangedModel','cancelModelRetry'])if(!document.getElementById(id).onclick)throw new Error('모델 복구 선택 동작 누락');
+   })()`);
+   fs.writeFileSync(path.join(artifacts,'ui-model-error.png'),(await capture()).toPNG());
+   await contents.executeJavaScript("document.querySelector('#modelErrorLayer').hidden=true");
+   fs.writeFileSync(path.join(artifacts,'ui-dark.png'),(await capture()).toPNG());
+   const previewImage=require('node:url').pathToFileURL(path.resolve(__dirname,'../src/assets/app-icon.png')).href;
+   await contents.executeJavaScript('renderImages('+JSON.stringify(Array.from({length:4},(_,i)=>({role:i?'body':'title',sequence:i,path:'D:/very-long-generated-image-directory/'.repeat(8)+'image.png',url:previewImage})))+');document.querySelector("#imageGrid").scrollIntoView({block:"center"})');
+   await new Promise(r=>setTimeout(r,200));
+   const imagesLayout=await contents.executeJavaScript('({overflow:document.documentElement.scrollWidth>innerWidth,cards:[...document.querySelectorAll(".thumb img")].map(e=>({width:e.getBoundingClientRect().width,height:e.getBoundingClientRect().height}))})');
+   assert.equal(imagesLayout.overflow,false);assert.equal(imagesLayout.cards.length,4);assert.ok(imagesLayout.cards.every(r=>r.height===220 && r.width<600));
+   fs.writeFileSync(path.join(artifacts,'ui-images.png'),(await capture()).toPNG());
 
-(async () => {
-  const smokeRuntimeRoot = path.resolve(__dirname, "..", "runtime", ".smoke-electron-runtime");
-  const screenshotDir = path.resolve(__dirname, "..", "runtime", ".smoke-electron-screenshots");
-  const userDataDir = path.join(smokeRuntimeRoot, "browser-profile");
-  const smokeAssetDir = path.join(smokeRuntimeRoot, "account-assets", "acct_smoke_delete");
-  const smokeSampleImagePath = path.join(smokeAssetDir, "sample.png");
-  fs.rmSync(smokeRuntimeRoot, { recursive: true, force: true });
-  fs.rmSync(screenshotDir, { recursive: true, force: true });
-  fs.mkdirSync(smokeRuntimeRoot, { recursive: true });
-  fs.mkdirSync(screenshotDir, { recursive: true });
-  fs.mkdirSync(userDataDir, { recursive: true });
-  console.log("Launching Electron...");
-  const app = await electron.launch({
-    executablePath: electronExecutable,
-    args: ["--disable-gpu", "--disable-software-rasterizer", `--user-data-dir=${userDataDir}`, "."],
-    env: {
-      ...process.env,
-      BLOGAUTO_SKIP_CODEX_USAGE_REFRESH: "1",
-      BLOGAUTO_RUNTIME_ROOT: smokeRuntimeRoot
-    }
-  });
-  try {
-    console.log("Waiting for first window...");
-    const window = await Promise.race([
-      app.firstWindow(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("Timed out waiting for Electron window.")), 20000))
-    ]);
-    console.log("Window opened.");
-    await window.waitForLoadState("domcontentloaded");
-    await window.waitForSelector("#jobForm", { timeout: 15000 });
-
-    const checks = [
-      ["title", "Naver Blog Automator"],
-      ["blog id", "#blogId"],
-      ["manual login guidance", ".account-login-guidance"],
-      ["startup notice", "#startupNotice"],
-      ["dismiss startup notice", "#dismissStartupNoticeButton"],
-      ["add account", "#addAccountButton"],
-      ["update account", "#updateAccountButton"],
-      ["clear account form", "#clearAccountFormButton"],
-      ["account sample preview", "#accountSampleImagePreview"],
-      ["account sample choose", "#chooseAccountSampleImageButton"],
-      ["account sample delete", "#deleteAccountSampleImageButton"],
-      ["topic", "#topic"],
-      ["account list", "#accountList"],
-      ["category list", "#categoryList"],
-      ["topic mode", "#topicMode"],
-      ["publish visibility", "#publishVisibility"],
-      ["publish schedule", "#publishScheduleMode"],
-      ["codex model", "#codexModel"],
-      ["main log", "#mainLogStream"],
-      ["research log", "#researchLogStream"],
-      ["writer log", "#writerLogStream"],
-      ["selected title", "#selectedTitle"],
-      ["category excluded topics", "#categoryExcludedTopics"],
-      ["category publish purpose", "#categoryPublishPurpose"],
-      ["category preferred tone", "#categoryPreferredTone"],
-      ["category freshness level", "#categoryFreshnessLevel"],
-      ["article", "#articlePreview"],
-      ["title image aspect ratio", "#titleImageAspectRatio"],
-      ["body image aspect ratio", "#bodyImageAspectRatio"],
-      ["image grid", "#imageGrid"],
-      ["history", "#historyBody"],
-      ["codex weekly usage badge", "#codexWeeklyLimitBadge"]
-    ];
-
-    for (const [name, selectorOrText] of checks) {
-      if (name === "title") {
-        const title = await window.title();
-        if (!title.includes(selectorOrText)) {
-          throw new Error(`Expected window title to include ${selectorOrText}, got ${title}`);
-        }
-        continue;
-      }
-      const count = await window.locator(selectorOrText).count();
-      if (!count) {
-        throw new Error(`Missing UI element: ${name}`);
-      }
-    }
-
-    if (await window.locator("#naverId, #naverPassword").count()) {
-      throw new Error("Naver credential fields must not be present.");
-    }
-    const loginGuidance = await window.locator(".account-login-guidance").textContent();
-    if (!String(loginGuidance || "").includes("직접 입력")) {
-      throw new Error("Manual Naver login guidance is missing.");
-    }
-    if (await window.locator("#startupNotice").isVisible().catch(() => false)) {
-      await window.evaluate(() => {
-        window.localStorage.setItem("blogauto.startupNotice.dismissed.v2", "true");
-        const notice = document.querySelector("#startupNotice");
-        if (notice) notice.hidden = true;
-      });
-    }
-
-    await window.evaluate(() => {
-      const grid = document.querySelector("#imageGrid");
-      if (!grid) return;
-      grid.innerHTML = "";
-      for (let index = 1; index <= 12; index += 1) {
-        const card = document.createElement("div");
-        card.className = "thumb";
-        card.innerHTML = `
-          <div style="height:90px;background:#dbeafe;border-radius:6px"></div>
-          <span>IMAGE ${index}</span>
-          <code class="image-path">runtime/image/test_${index}.png</code>
-          <div class="thumb-actions"><button type="button">open</button><button type="button">show</button></div>
-        `;
-        grid.appendChild(card);
-      }
-    });
-    const imagePanelScrollable = await window.locator(".image-panel").evaluate((element) => (
-      element.scrollHeight > element.clientHeight
-    ));
-    if (!imagePanelScrollable) {
-      throw new Error("Image preview panel is not scrollable with many images.");
-    }
-
-    const panelSelectors = [
-      ".preview-panel",
-      ".main-log-panel",
-      ".research-log-panel",
-      ".writer-log-panel",
-      ".history-panel"
-    ];
-    for (const { width, height } of [
-      { width: 1440, height: 900 },
-      { width: 1280, height: 768 },
-      { width: 1180, height: 900 },
-      { width: 980, height: 900 }
-    ]) {
-      const nativeSize = await app.evaluate(({ BrowserWindow }, size) => {
-        const targetWindow = BrowserWindow.getAllWindows()[0];
-        targetWindow.setContentSize(size.width, size.height);
-        return targetWindow.getContentSize();
-      }, { width, height });
-      await window.waitForTimeout(250);
-      const viewportSize = await window.evaluate(() => ({
-        width: document.documentElement.clientWidth,
-        height: document.documentElement.clientHeight
-      }));
-      if (Math.abs(nativeSize[0] - viewportSize.width) > 1 || Math.abs(nativeSize[1] - viewportSize.height) > 1) {
-        throw new Error(`Native window/content viewport mismatch at ${width}x${height}: native=${nativeSize.join("x")}, viewport=${viewportSize.width}x${viewportSize.height}`);
-      }
-      const layoutResult = await window.evaluate(({ selectors, requireVerticalFit }) => {
-        const viewportWidth = document.documentElement.clientWidth;
-        const viewportHeight = document.documentElement.clientHeight;
-        return selectors.map((selector) => {
-          const element = document.querySelector(selector);
-          if (!element) return { selector, ok: false, reason: "missing" };
-          const rect = element.getBoundingClientRect();
-          const horizontalOk = rect.left >= -1 && rect.right <= viewportWidth + 1 && rect.width > 0;
-          const verticalOk = !requireVerticalFit || (
-            rect.top >= -1 && rect.bottom <= viewportHeight + 1 && rect.height > 0
-          );
-          return {
-            selector,
-            ok: horizontalOk && verticalOk,
-            left: rect.left,
-            right: rect.right,
-            top: rect.top,
-            bottom: rect.bottom,
-            viewportWidth,
-            viewportHeight
-          };
-        });
-      }, { selectors: panelSelectors, requireVerticalFit: width > 980 });
-      const badPanel = layoutResult.find((item) => !item.ok);
-      if (badPanel) {
-        throw new Error(`Panel overflows at ${width}x${height}: ${JSON.stringify(badPanel)}`);
-      }
-      await window.screenshot({ path: path.join(screenshotDir, `layout-${width}x${height}.png`) });
-    }
-
-    await app.evaluate(({ BrowserWindow }) => {
-      BrowserWindow.getAllWindows()[0].setContentSize(1440, 900);
-    });
-    await window.waitForTimeout(250);
-    console.log("Responsive layout screenshots captured.");
-
-    fs.mkdirSync(smokeAssetDir, { recursive: true });
-    fs.writeFileSync(smokeSampleImagePath, Buffer.from(
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
-      "base64"
-    ));
-    await window.evaluate(async ({ sampleImagePath }) => {
-      await window.blogAuto.saveAccountStore({
-        selectedAccountId: "acct_smoke_delete",
-        accounts: [{
-          id: "acct_smoke_delete",
-          label: "Smoke Delete Account",
-          blogId: "smoke-blog",
-          checked: true,
-          sessionStatus: "unknown",
-          sessionCheckedAt: "",
-          sampleImagePath,
-          sampleImageHash: "smokehash",
-          sampleImageUpdatedAt: new Date().toISOString(),
-          imageStylePrompt: "smoke custom image style",
-          imageStylePromptUpdatedAt: new Date().toISOString(),
-          imageStylePromptStatus: "ready",
-          imageStylePromptSourceImageHash: "smokehash",
-          imageStylePromptError: "",
-          categories: [{
-            id: "cat_smoke_delete",
-            name: "Smoke Category",
-            keyword: "smoke keyword",
-            excludedTopics: "smoke excluded topic",
-            publishPurpose: "smoke publish purpose",
-            preferredTone: "smoke preferred tone",
-            freshnessLevel: "high",
-            searchChannel: "news",
-            primarySearchProvider: "google",
-            fallbackSearchProvider: "naver",
-            trustBlogAsSource: true,
-            checked: true
-          }]
-        }]
-      });
-    }, { sampleImagePath: smokeSampleImagePath });
-    await window.waitForSelector(".account-row");
-    const rowSessionButtons = await window.locator(".account-row [data-action='session']").count();
-    if (!rowSessionButtons) {
-      throw new Error("Account row session check button is missing.");
-    }
-    await window.locator("#toggleAccountManagerButton").click();
-    await window.locator(".account-row").filter({ hasText: "Smoke Delete Account" }).click();
-    const samplePreviewImages = await window.locator("#accountSampleImagePreview img").count();
-    if (!samplePreviewImages) {
-      throw new Error("Account sample image preview did not render.");
-    }
-    await window.screenshot({ path: path.join(screenshotDir, "manual-login-account-ui.png") });
-    console.log("Manual-login account UI captured.");
-    await window.locator(".category-row").filter({ hasText: "Smoke Category" }).locator("[data-action='edit']").click();
-    const categoryEditSnapshot = await window.evaluate(() => ({
-      name: document.querySelector("#categoryName")?.value || "",
-      keyword: document.querySelector("#categoryKeyword")?.value || "",
-      excludedTopics: document.querySelector("#categoryExcludedTopics")?.value || "",
-      publishPurpose: document.querySelector("#categoryPublishPurpose")?.value || "",
-      preferredTone: document.querySelector("#categoryPreferredTone")?.value || "",
-      freshnessLevel: document.querySelector("#categoryFreshnessLevel")?.value || "",
-      searchChannel: document.querySelector("#categorySearchChannel")?.value || "",
-      primarySearchProvider: document.querySelector("#categoryPrimarySearchProvider")?.value || "",
-      fallbackSearchProvider: document.querySelector("#categoryFallbackSearchProvider")?.value || "",
-      trustBlogAsSource: document.querySelector("#categoryTrustBlogAsSource")?.checked === true
-    }));
-    const expectedCategoryEditSnapshot = {
-      name: "Smoke Category",
-      keyword: "smoke keyword",
-      excludedTopics: "smoke excluded topic",
-      publishPurpose: "smoke publish purpose",
-      preferredTone: "smoke preferred tone",
-      freshnessLevel: "high",
-      searchChannel: "news",
-      primarySearchProvider: "google",
-      fallbackSearchProvider: "naver",
-      trustBlogAsSource: true
-    };
-    for (const [field, expected] of Object.entries(expectedCategoryEditSnapshot)) {
-      if (categoryEditSnapshot[field] !== expected) {
-        throw new Error(`Category edit field ${field} did not load: expected ${expected}, got ${categoryEditSnapshot[field]}`);
-      }
-    }
-    await window.evaluate(() => document.querySelector("#toggleCategoryManagerButton")?.click());
-    const autoRetryCalls = await window.evaluate(async () => {
-      if (typeof window.startAutoPublishing !== "function") {
-        throw new Error("startAutoPublishing is not available for renderer smoke test.");
-      }
-      const originalHooks = window.__blogAutoTestHooks;
-      const originalDelayMinutes = document.querySelector("#repeatTermMinutes")?.value || "60";
-      let calls = 0;
-      window.__blogAutoTestHooks = {
-        ...(originalHooks || {}),
-        startJob: async () => {
-          calls += 1;
-          return calls < 3
-            ? { status: "duplicate_retry", reason: "duplicate title in smoke test" }
-            : { status: "codex_usage_limit" };
-        }
-      };
-      const repeatTerm = document.querySelector("#repeatTermMinutes");
-      if (repeatTerm) repeatTerm.value = "0";
-      try {
-        await window.startAutoPublishing();
-      } finally {
-        if (originalHooks) {
-          window.__blogAutoTestHooks = originalHooks;
-        } else {
-          delete window.__blogAutoTestHooks;
-        }
-        if (repeatTerm) repeatTerm.value = originalDelayMinutes;
-      }
-      return calls;
-    });
-    if (autoRetryCalls !== 3) {
-      throw new Error(`Auto publishing did not retry failed target 3 times, got ${autoRetryCalls}.`);
-    }
-    console.log("Duplicate retry flow passed.");
-    const researchRetryCalls = await window.evaluate(async () => {
-      const originalHooks = window.__blogAutoTestHooks;
-      const originalDelayMinutes = document.querySelector("#repeatTermMinutes")?.value || "60";
-      let calls = 0;
-      window.__blogAutoTestHooks = {
-        ...(originalHooks || {}),
-        startJob: async () => {
-          calls += 1;
-          if (calls >= 2) {
-            document.querySelector("#stopAutoButton")?.click();
-          }
-          return {
-            status: "failed",
-            reason: "research blocked in smoke test",
-            failurePhase: "research"
-          };
-        }
-      };
-      const repeatTerm = document.querySelector("#repeatTermMinutes");
-      if (repeatTerm) repeatTerm.value = "0";
-      try {
-        await window.startAutoPublishing();
-      } finally {
-        if (originalHooks) {
-          window.__blogAutoTestHooks = originalHooks;
-        } else {
-          delete window.__blogAutoTestHooks;
-        }
-        if (repeatTerm) repeatTerm.value = originalDelayMinutes;
-      }
-      return calls;
-    });
-    if (researchRetryCalls !== 2) {
-      throw new Error(`Research-stage auto retry should stop after 2 attempts, got ${researchRetryCalls}.`);
-    }
-    console.log("Research retry flow passed.");
-    await window.locator("#accountLabel").fill("Smoke Edited Account");
-    await window.locator("#updateAccountButton").click();
-    await window.waitForFunction(() => (
-      [...document.querySelectorAll(".account-row")]
-        .some((row) => row.textContent.includes("Smoke Edited Account"))
-    ));
-    console.log("Account update flow passed.");
-    window.on("dialog", (dialog) => dialog.accept());
-    await window.locator(".account-row").filter({ hasText: "Smoke Edited Account" }).locator("[data-action='delete']").click();
-    await window.waitForFunction(() => (
-      [...document.querySelectorAll(".account-row")]
-        .every((row) => !row.textContent.includes("Smoke Edited Account"))
-    ));
-    console.log("Account delete flow passed.");
-
-    console.log("Electron smoke test passed.");
-
-  } finally {
-    await app.close();
-    fs.rmSync(smokeRuntimeRoot, { recursive: true, force: true });
-  }
-})().catch((error) => {
-  console.error(error);
-  process.exit(1);
+   await contents.executeJavaScript(`document.querySelector('#themeToggle').click()`);
+   assert.equal(await contents.executeJavaScript('document.documentElement.dataset.theme'),'light');
+   fs.writeFileSync(path.join(artifacts,'ui-light.png'),(await capture()).toPNG());
+   const scroll=await contents.executeJavaScript(`(async()=>{
+    document.querySelector('#accountManager').classList.remove('collapsed');
+    const panel=document.querySelector('.input-panel');
+    const measure=()=>['saveSettingsButton','startButton','stopAutoButton'].map(id=>{const b=document.getElementById(id).getBoundingClientRect();return {top:b.top,bottom:b.bottom,height:b.height,width:b.width};});
+    panel.scrollTop=panel.scrollHeight/2;const middle=measure();
+    panel.scrollTop=panel.scrollHeight;const bottom=measure();
+    for(const agent of ['main','research','writer'])addLog({agent,message:agent+' 진행 로그 표시 확인'});
+    const logs=document.querySelector('.logs-panel');logs.scrollIntoView({block:'center'});
+    await new Promise(r=>setTimeout(r,100));
+    const logBox=logs.getBoundingClientRect();
+    return {middle,bottom,logsInView:logBox.top>=0 && logBox.bottom<=innerHeight,logsVisible:[...logs.querySelectorAll('.log-stream')].every(el=>el.getClientRects().length>0 && el.textContent.includes('로그 표시 확인')),collapsed:Boolean(logs.closest('details:not([open])'))};
+   })()`);
+   assert.equal(scroll.logsVisible,true);assert.equal(scroll.logsInView,true);assert.equal(scroll.collapsed,false);
+   for(const position of ['middle','bottom'])for(let i=0;i<scroll[position].length;i++){
+    assert.equal(scroll[position][i].height,44);
+    if(i)assert.ok(scroll[position][i].top>=scroll[position][i-1].bottom+7);
+   }
+   fs.writeFileSync(path.join(artifacts,'ui-scroll-logs.png'),(await capture()).toPNG());
+   BrowserWindow.fromWebContents(contents).setSize(1040,920);
+   await new Promise(r=>setTimeout(r,200));
+   const narrow=await contents.executeJavaScript(`(()=>{window.scrollTo(0,0);const models=document.querySelector('.agent-model-toolbar').getBoundingClientRect(),actions=document.querySelector('.header-actions').getBoundingClientRect();return {below:models.top>=actions.bottom,overflow:document.documentElement.scrollWidth>innerWidth};})()`);
+   assert.equal(narrow.below,true);assert.equal(narrow.overflow,false);
+   fs.writeFileSync(path.join(artifacts,'ui-narrow-header.png'),(await capture()).toPNG());
+   await contents.executeJavaScript(`(()=>{
+    state.accountStore={accounts:[{id:'ui-account',label:'테스트 계정',blogId:'ui-fixture',categories:[],sessionStatus:'unknown',connection:{connected:true,busy:false}}],selectedAccountId:'ui-account'};
+    renderAccounts();document.querySelector('.input-panel').scrollTop=0;
+    const row=document.querySelector('.account-row');
+    if(row.querySelector('[data-action="select"]'))throw new Error('불필요한 선택 버튼');
+    if(!row.querySelector('[data-action="cancel"]').hidden)throw new Error('대기 중이 아닌 계정에 취소 버튼 표시');
+    if(row.querySelector('[data-action="connect"]').textContent!=='확장프로그램 연결')throw new Error('확장 연결 이름 불일치');
+    if(getComputedStyle(row.querySelector('[data-action="connect"]')).backgroundColor===getComputedStyle(row.querySelector('[data-action="open"]')).backgroundColor)throw new Error('확장 연결 색상 구분 실패');
+    if(!row.querySelector('.badge').textContent.includes('로그인 미확인'))throw new Error('로그인 상태 표시 불일치');
+    const account=state.accountStore.accounts[0];
+    account.sessionStatus='valid';renderAccounts();
+    for(const action of ['open','connect'])if(!document.querySelector('[data-action="'+action+'"]').disabled)throw new Error('완료된 계정의 불필요한 버튼 활성화: '+action);
+    account.sessionStatus='disconnected';account.connection.connected=false;renderAccounts();
+    for(const action of ['open','connect'])if(document.querySelector('[data-action="'+action+'"]').disabled)throw new Error('연결 복구 버튼 비활성화: '+action);
+    account.sessionStatus='unknown';account.connection.connected=true;renderAccounts();
+    if(document.querySelector('[data-action="session"]'))throw new Error('중복 로그인 확인 버튼');
+    account.tistoryBlogId='boksajang';renderAccounts();
+    if(document.querySelector('#tistoryConnectionPanel').hidden)throw new Error('티스토리 공용 연결 누락');
+    if(document.querySelector('#publishToTistoryAfterNaver'))throw new Error('기존 티스토리 체크박스 남음');
+    applyTheme('dark');
+   })()`);
+   fs.writeFileSync(path.join(artifacts,'ui-account-controls.png'),(await capture()).toPNG());
+   await contents.executeJavaScript("document.querySelector('#toggleAccountManagerButton').click()");
+   fs.writeFileSync(path.join(artifacts,'ui-account-form.png'),(await capture()).toPNG());
+   await contents.executeJavaScript(`(()=>{
+    state.historyModalOpen=true;
+    renderHistory([{id:'fixture-attempts',status:'failed',research_title:'지원 정보',reason:'전체 3회 시도 소진',attempts:[{attempt:1,title:'첫 주제',status:'failed',reason:'공식 지원 대상 원문 없음',queries:['공식 공고'],tokenUsage:{total:100}},{attempt:2,title:'다른 범위',status:'failed',reason:'신청 절차 미확보',queries:['신청 안내'],tokenUsage:{total:200}},{attempt:3,title:'세 번째 주제',status:'failed',reason:'적용 연도 확인 불가',queries:['변경 공고'],tokenUsage:{total:300}}]}]);
+    document.querySelector('.history-details').open=true;
+    const history=document.querySelector('#historyBody').textContent;
+    if(!history.includes('전체 시도 3/3') || !history.includes('공식 지원 대상 원문 없음') || !history.includes('신청 안내'))throw new Error('회차별 상세 이력 표시 실패');
+   })()`);
+   fs.writeFileSync(path.join(artifacts,'ui-attempt-history.png'),(await capture()).toPNG());
+   assert.deepEqual(errors,[]);console.log('UI smoke passed',JSON.stringify(result));app.exit(0);
+  }catch(error){console.error(error,errors);app.exit(1);}
+ });
 });
+setTimeout(()=>{console.error('UI smoke timeout');app.exit(1);},25000).unref();
+require('../src/main');

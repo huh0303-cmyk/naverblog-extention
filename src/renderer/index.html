@@ -1,18 +1,16 @@
 <!doctype html>
-<html lang="ko">
+<html lang="ko" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Naver Blog Automator</title>
+    <title>네이버 블로그 자동화 by @복사장의생존발악</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
+    <header class="titlebar"><img src="../assets/app-icon.png" alt="" /><span>네이버 블로그 자동화 <span class="titlebar-credit">by @복사장의생존발악</span></span></header>
     <div class="app-shell">
+      <p id="runtimePath" hidden>런타임 폴더 확인 중</p>
       <header class="topbar">
-        <div>
-          <h1>Naver Blog Automator</h1>
-          <p id="runtimePath">런타임 폴더 확인 중</p>
-        </div>
         <div class="agent-model-toolbar" aria-label="Agent model settings">
           <label>
             <span>Codex Model</span>
@@ -64,7 +62,7 @@
             </select>
           </label>
         </div>
-        <div class="header-actions">
+        <div class="header-actions"><button id="themeToggle" class="ghost" type="button" aria-pressed="false">라이트 모드</button><button id="extensionSetup" class="ghost" type="button">크롬 확장 설치</button>
           <span id="tokenBadge" class="badge token">누적 0 tokens</span>
           <span id="codexWeeklyLimitBadge" class="badge limit unknown">주간 잔량 -</span>
           <span id="runState" class="badge info">대기</span>
@@ -74,7 +72,7 @@
 
       <div id="sessionNotice" class="session-notice" role="status" aria-live="polite" hidden>
         <div>
-          <strong>계정별 로그인이 필요합니다.</strong>
+          <strong>계정 연결·로그인 상태를 확인해 주세요.</strong>
           <p id="sessionNoticeText">등록한 계정마다 세션 확인을 진행하고, 브라우저에서 로그인을 완료해 주세요.</p>
         </div>
         <button id="dismissSessionNoticeButton" class="ghost small" type="button">확인</button>
@@ -84,12 +82,12 @@
         <div class="startup-card">
           <div>
             <h2 id="startupNoticeTitle">처음 실행 안내</h2>
-            <p>네이버 로그인, 세션 확인, 블로그 발행은 Chrome이 설치되어 있어야 작동합니다. Chrome이 없으면 본문 생성은 가능하지만 발행 단계는 진행할 수 없습니다.</p>
+            <p>네이버 로그인, 세션 확인, 블로그 발행은 설치된 일반 Chrome의 계정별 창에 확장을 연결해야 작동합니다. Chrome이 없으면 본문 생성은 가능하지만 발행 단계는 진행할 수 없습니다.</p>
           </div>
           <ul>
-            <li><strong>네이버 아이디와 비번은 직접 입력을 하셔야 합니다.</strong></li>
+            <li><strong>로그인은 앱에서 연 계정별 일반 Chrome 창에서만 진행합니다.</strong></li>
             <li><strong>Blog ID</strong>에는 네이버 블로그 주소의 ID를 입력합니다.</li>
-            <li>자동 발행 전 계정관리에서 세션 확인을 누르고 열린 Chrome에서 직접 로그인하세요.</li>
+            <li>계정별 브라우저 연결 코드를 확장에 입력하세요. 한 번 연결한 창의 로그인은 해당 계정에만 유지됩니다.</li>
           </ul>
           <button id="dismissStartupNoticeButton" class="primary" type="button">확인</button>
         </div>
@@ -102,11 +100,13 @@
             <span id="settingsState" class="hint">설정 파일 자동 저장</span>
           </div>
           <form id="jobForm" class="form-grid">
-            <div class="manager-block wide">
+            <div class="manager-block wide account-section">
               <div class="manager-head">
                 <strong>계정 관리</strong>
-                <button id="bulkSessionCheckButton" class="ghost small" type="button">세션일괄확인</button>
-                <button id="toggleAccountManagerButton" class="ghost small" type="button">펼치기</button>
+                <div class="manager-tools">
+                  <button id="bulkSessionCheckButton" class="ghost small" type="button" title="체크된 계정의 Chrome·확장 연결 및 로그인 상태를 확인합니다">세션일괄확인</button>
+                  <button id="toggleAccountManagerButton" class="ghost small" type="button">펼치기</button>
+                </div>
               </div>
               <div id="accountManager" class="account-manager collapsed">
                 <p class="account-login-guidance">네이버 아이디와 비번은 직접 입력을 하셔야 합니다.</p>
@@ -118,16 +118,17 @@
                   <span>Blog ID</span>
                   <input id="blogId" name="blogId" placeholder="예: 블로그 주소의 ID" />
                 </label>
+                <label><span>티스토리 Blog ID (선택)</span><input id="accountTistoryBlogId" placeholder="예: boksajang · 비우면 네이버만 발행" /></label>
                 <div class="account-sample-image">
                   <div class="sample-image-preview" id="accountSampleImagePreview">
-                    <span>No sample image</span>
+                    <span>샘플 없음</span>
                   </div>
                   <div class="sample-image-meta">
-                    <strong>Image style sample</strong>
-                    <small id="accountImagePromptStatus">Default image style</small>
+                    <strong>이미지 스타일 샘플</strong>
+                    <small id="accountImagePromptStatus">기본 이미지 스타일</small>
                     <div class="button-row">
-                      <button id="chooseAccountSampleImageButton" class="ghost" type="button">Upload / change</button>
-                      <button id="deleteAccountSampleImageButton" class="ghost danger-button" type="button">Delete</button>
+                      <button id="chooseAccountSampleImageButton" class="ghost" type="button">이미지 변경</button>
+                      <button id="deleteAccountSampleImageButton" class="ghost danger-button" type="button">삭제</button>
                     </div>
                   </div>
                 </div>
@@ -138,9 +139,18 @@
                 </div>
               </div>
               <div id="accountList" class="account-list"></div>
+              <div id="tistoryConnectionPanel" class="manager-block" hidden>
+                <strong>티스토리 공용 로그인</strong>
+                <p class="hint" id="tistoryConnectionStatus">한 번 로그인하면 등록된 티스토리 블로그에서 함께 사용합니다.</p>
+                <div class="account-actions">
+                  <button id="openTistoryButton" class="ghost small" type="button">티스토리 열기</button>
+                  <button id="pairTistoryButton" class="ghost small extension-connect" type="button">확장프로그램 연결</button>
+                  <button id="cancelTistoryButton" class="ghost small" type="button" hidden>대기 취소</button>
+                </div>
+              </div>
             </div>
 
-            <div class="manager-block wide">
+            <div class="manager-block wide category-section">
               <div class="manager-head">
                 <strong>카테고리 관리</strong>
                 <button id="toggleCategoryManagerButton" class="ghost small" type="button">카테고리 관리</button>
@@ -176,12 +186,13 @@
                   </select>
                 </label>
                 <label>
-                  <span>네이버 검색 탭</span>
+                  <span>주제 탐색 탭</span>
                   <select id="categorySearchChannel">
                     <option value="blog">블로그</option>
                     <option value="news">뉴스</option>
                     <option value="web">웹</option>
                   </select>
+                  <small>선택한 탭에서 주제를 탐색합니다. 필요한 사실은 공식 원문·법령·판례로 별도 확인합니다.</small>
                 </label>
                 <label>
                   <span>검색 Primary</span>
@@ -199,44 +210,22 @@
                 </label>
                 <label class="compact-check">
                   <input id="categoryTrustBlogAsSource" type="checkbox" />
-                  블로그를 신뢰 근거로 인정
+                  추가 출처 신뢰성 검증 생략
                 </label>
+                <p class="hint">체크하면 주제와 관계없이 선택한 검색 범위의 자료로 작성합니다. 별도 공식 출처 검색·신뢰성 판정은 생략하고 원문 충실성과 글의 품질은 확인합니다.</p>
                 <button id="addCategoryButton" class="ghost" type="button">카테고리 등록/수정</button>
               </div>
               <div id="categoryList" class="category-list"></div>
             </div>
 
-            <div class="topic-mode-row wide">
-              <label>
-                <span>글 발행 방식</span>
-                <select id="topicMode">
-                  <option value="manual">수동</option>
-                  <option value="auto">자동</option>
-                </select>
-              </label>
-              <label class="compact-check body-break-option">
-                <input id="breakSentencesInBody" type="checkbox" checked />
-                본문 내 문장 줄바꿈
-              </label>
-            </div>
+            <label id="crossPublishLabel" class="compact-check wide">
+              <input id="crossPublish" type="checkbox" /> 교차발행 (계정별 카테고리를 번갈아 진행)
+            </label>
             <label id="repeatTermLabel">
               <span>반복주기 Term (분)</span>
               <input id="repeatTermMinutes" type="number" min="1" step="1" value="60" />
             </label>
-            <label id="manualTopicLabel" class="wide">
-              <span>주제</span>
-              <input id="topic" name="topic" />
-            </label>
-            <div class="check-row wide">
-              <label><input id="publishAfterGenerate" type="checkbox" /> 생성 후 Naver 발행까지 진행</label>
-            </div>
-            <div class="check-row wide">
-              <label><input id="publishToTistoryAfterNaver" type="checkbox" /> Naver 발행 성공 후 Tistory에도 발행</label>
-            </div>
-            <label class="wide">
-              <span>Tistory Blog ID</span>
-              <input id="tistoryBlogId" placeholder="예: myblog" />
-            </label>
+
             <div class="inline-row wide">
               <label>
                 <span>공개설정</span>
@@ -257,26 +246,16 @@
                 <input id="reserveAfterHours" type="number" min="1" step="1" value="3" />
               </label>
             </div>
+            <div class="form-actions wide">
             <button id="saveSettingsButton" class="ghost wide" type="button">설정 저장</button>
-            <button id="tistoryTestButton" class="ghost wide" type="button">Tistory 테스트 발행</button>
+            <button hidden id="tistoryTestButton" class="ghost wide" type="button">Tistory 테스트 발행</button>
             <button id="startButton" class="primary wide" type="submit">작업 시작</button>
             <button id="stopAutoButton" class="ghost wide" type="button" disabled>자동 중지</button>
+            </div>
           </form>
         </section>
 
-        <section class="panel preview-panel" aria-label="생성 본문">
-          <div class="panel-head">
-            <h2>생성된 본문</h2>
-            <span id="articleMeta" class="hint">아직 생성 전</span>
-          </div>
-          <div class="selected-title">
-            <span>선정 제목</span>
-            <strong id="selectedTitle">아직 선정 전</strong>
-          </div>
-          <textarea id="articlePreview" readonly placeholder="codex.cmd가 생성한 본문이 여기에 표시됩니다."></textarea>
-        </section>
-
-        <section class="panel main-log-panel" aria-label="Main Agent 로그">
+        <section class="logs-panel" aria-label="에이전트 진행 로그"><div id="targetProgress" class="target-progress" hidden></div><h2>에이전트 진행 로그</h2><div class="log-grid">        <section class="panel main-log-panel" aria-label="Main Agent 로그">
           <div class="panel-head">
             <h2>Main Agent</h2>
             <button id="clearLogButton" class="ghost small" type="button">지우기</button>
@@ -298,6 +277,24 @@
           <div id="writerLogStream" class="log-stream"></div>
         </section>
 
+</div></section>
+
+        <section class="panel preview-panel" aria-label="생성 본문">
+          <div class="panel-head">
+            <h2>생성된 본문</h2>
+            <div class="preview-head-actions">
+              <span id="articleMeta" class="hint">아직 생성 전</span>
+              <button id="cancelPendingJobButton" type="button" class="ghost small danger-button" disabled title="취소할 기존 작업이 없습니다.">기존 작업 취소</button>
+            </div>
+          </div>
+          <div class="selected-title">
+            <span>선정 제목</span>
+            <strong id="selectedTitle">아직 선정 전</strong>
+          </div>
+          <textarea id="articlePreview" readonly placeholder="선택한 주제로 생성된 본문이 이곳에 표시됩니다.
+왼쪽에서 블로그와 주제를 선택하고 작업을 시작하세요."></textarea>
+        </section>
+
         <section class="panel image-panel" aria-label="생성 이미지 미리보기">
           <div class="panel-head">
             <h2>이미지 미리보기</h2>
@@ -305,17 +302,19 @@
               <label class="compact-select">
                 <span>타이틀비율</span>
                 <select id="titleImageAspectRatio">
-                  <option value="16:9" selected>16:9</option>
-                  <option value="9:16">9:16</option>
                   <option value="1:1">1:1</option>
+                  <option value="16:9" selected>16:9</option>
+                  <option value="3:4">3:4</option>
+                  <option value="9:16">9:16</option>
                 </select>
               </label>
               <label class="compact-select">
                 <span>본문비율</span>
                 <select id="bodyImageAspectRatio">
-                  <option value="16:9" selected>16:9</option>
-                  <option value="9:16">9:16</option>
                   <option value="1:1">1:1</option>
+                  <option value="16:9" selected>16:9</option>
+                  <option value="3:4">3:4</option>
+                  <option value="9:16">9:16</option>
                 </select>
               </label>
               <label class="compact-check"><input id="includeTitleImage" type="checkbox" checked /> 타이틀이미지생성</label>
@@ -366,6 +365,22 @@
         </div>
       </section>
     </div>
-    <script src="./app.js"></script>
+    <div id="extensionGuide" class="modal-backdrop" hidden><section class="extension-guide" role="dialog" aria-modal="true" aria-labelledby="extensionGuideTitle">
+    <div class="panel-head"><h2 id="extensionGuideTitle">내 Chrome 연결하기</h2><button id="closeExtensionGuide" class="ghost" type="button">닫기</button></div>
+    <ol><li>계정을 추가한 뒤 ‘블로그 열기’를 누르세요. PC의 정식 Chrome이 해당 블로그 주소로 열립니다. Google 계정 로그인은 필요하지 않습니다.</li><li><b>설치 폴더 준비</b>를 누르면 영구 설치 폴더가 열리고 경로가 복사됩니다.</li><li>Chrome 주소창에 <b>chrome://extensions</b> 입력 → 개발자 모드 켜기 → 압축해제된 확장 프로그램 로드 → 복사한 폴더 선택.</li><li>Chrome 확장 아이콘에서 BlogAuto를 열고 아래 연결 코드를 입력하세요. 기존 로그인을 그대로 확인합니다.</li></ol>
+    <div class="button-row"><button id="prepareExtensionFolder" class="primary" type="button">설치 폴더 준비 · 경로 복사</button><button id="copyExtensionsUrl" class="ghost" type="button">Chrome 설정 주소 복사</button></div>
+    <p id="extensionFolder" class="hint"></p><strong id="pairingCode" class="pairing-code">계정의 ‘브라우저 연결’을 눌러 주세요.</strong><p id="pairingHelp">업데이트 후에는 Chrome 확장 관리 화면에서 BlogAuto의 새로고침 버튼을 누르세요. 최초 설치 후 이 폴더를 이동하거나 삭제하지 마세요.</p>
+    <p class="hint">각 블로그 창의 로그인은 별도 로컬 폴더에 Chrome이 보관합니다. 앱은 쿠키를 읽거나 교체하지 않습니다. 처음에는 계정 창마다 확장을 설치하세요. 이후 세션 만료 시에만 직접 로그인하며 앱은 완료될 때까지 대기합니다.</p>
+    </section></div><script src="./app.js"></script>
+    <div id="modelErrorLayer" class="modal-backdrop" hidden>
+      <section class="startup-card" role="dialog" aria-modal="true" aria-labelledby="modelErrorTitle">
+        <h2 id="modelErrorTitle">모델 응답 대기</h2>
+        <p id="modelErrorMessage"></p>
+        <p class="hint">수집한 자료와 현재 진행 단계는 유지됩니다. 같은 모델로 한 번 더 시도하거나 모델을 변경해 이어갈 수 있습니다.</p>
+        <label>재시도 모델<select id="retryCodexModel"></select></label>
+        <details><summary>오류 상세</summary><pre id="modelErrorDetail" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:180px;overflow:auto"></pre></details>
+        <div class="button-row"><button id="retrySameModel" class="primary" type="button">같은 모델로 재시도</button><button id="retryChangedModel" class="ghost" type="button">선택한 모델로 재시도</button><button id="cancelModelRetry" class="ghost" type="button">작업 취소</button></div>
+      </section>
+    </div>
   </body>
 </html>

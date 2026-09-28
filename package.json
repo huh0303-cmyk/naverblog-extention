@@ -1,16 +1,19 @@
 {
   "name": "blogauto-naver-tistory",
-  "version": "0.1.0",
-  "description": "Windows desktop automation console for Naver Blog publishing through codex.cmd.",
+  "version": "0.2.5",
+  "description": "네이버 계정별 일반 Chrome 창과 확장프로그램으로 연결하는 글쓰기 앱",
   "main": "src/main.js",
   "scripts": {
-    "start": "electron .",
-    "start:runtime": "set BLOGAUTO_RUNTIME_ROOT=%CD%\\dist\\runtime&& electron .",
-    "start:runtime:autorun": "set BLOGAUTO_RUNTIME_ROOT=%CD%\\dist\\runtime&& set BLOGAUTO_AUTOSTART=1&& electron .",
-    "run:saved": "node scripts/run-saved-job.js",
-    "publish:latest": "node scripts/publish-latest-job.js",
+    "start": "electron scripts/dev-app.js",
+    "start:runtime": "electron scripts/dev-app.js",
     "check": "node scripts/check.js",
-    "dist": "electron-builder --win portable && node scripts/prepare-dist-runtime.js"
+    "dist": "electron-builder --win portable",
+    "dist:mac": "electron-builder --mac dmg",
+    "test": "node --test --experimental-test-isolation=none tests/*.test.js",
+    "test:ui": "electron scripts/smoke-electron.js",
+    "test:editor": "electron scripts/test-editor.js",
+    "test:documents": "node scripts/test-documents.js",
+    "icons": "node scripts/generate-icons.js"
   },
   "build": {
     "appId": "com.local.blogauto.naver",
@@ -20,26 +23,40 @@
     },
     "files": [
       "src/**/*",
+      "packages/blog-humanizer/**/*",
       "package.json"
     ],
     "extraResources": [
       {
         "from": "runtime-template",
         "to": "runtime"
+      },
+      {
+        "from": "extension",
+        "to": "extension"
       }
     ],
     "win": {
       "target": [
         "portable"
       ],
-      "artifactName": "Naver-Blog-Automator-${version}.${ext}"
+      "artifactName": "Naver-Blog-Automator-${version}.${ext}",
+      "icon": "src/assets/app-icon.ico"
     }
   },
-  "dependencies": {
-    "playwright-core": "^1.45.0"
-  },
   "devDependencies": {
-    "electron": "^31.0.0",
-    "electron-builder": "^24.13.3"
+    "electron": "^44.4.3",
+    "electron-builder": "^26.15.3"
+  },
+  "author": "BlogAuto contributors",
+  "dependencies": {
+    "@napi-rs/canvas": "^1.0.9",
+    "@ohah/hwpjs": "^0.1.0-rc.10",
+    "@tesseract.js-data/eng": "^1.0.0",
+    "@tesseract.js-data/kor": "^1.0.0",
+    "fast-xml-parser": "^5.11.1",
+    "fflate": "^0.8.3",
+    "pdfjs-dist": "^6.3.289",
+    "tesseract.js": "^7.0.0"
   }
 }

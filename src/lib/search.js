@@ -1,8 +1,10 @@
+const {canonicalUrl,navigationOnly,evidenceExcerpt}=require('./evidenceText');
+const {readSourceDocument}=require('./sourceDocument');
 const http = require("node:http");
 const https = require("node:https");
 
 const MAX_RESPONSE_CHARS = 1_500_000;
-const MAX_EXCERPT_CHARS = 1400;
+const MAX_EXCERPT_CHARS = 3000;
 const MAX_SELECTED_CONTENT_RESULTS = 20;
 const MAX_SEARCH_QUERY_VARIANTS = 4;
 const MAX_AUTHORITY_LINK_CANDIDATES = 6;
@@ -173,29 +175,26 @@ function decodeEntities(value) {
 }
 
 function stripTags(value) {
-  return decodeEntities(value)
+  return decodeEntities(String(value || "")
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
+    .replace(/<(?:[^>"']|"[^"]*"|'[^']*')*>/g, " "))
     .replace(/\s+/g, " ")
     .trim();
 }
 
 function isLikelyAd(text, url) {
-  const joined = `${text} ${url}`.toLowerCase();
-  return AD_WORDS.some((word) => joined.includes(word.toLowerCase()));
+  return /파워링크|스폰서\s*광고|\bsponsored\b/i.test(text) || /(?:adcr|adclick)\.naver\.com|googleadservices\.com/i.test(url);
 }
 
 function isLowValueResult(text, url) {
+  if(navigationOnly(url))return true;
   const joined = `${text} ${url}`.toLowerCase();
   const host = hostFromUrl(url);
-  if (/검색옵션|검색\s*고객센터|개인정보처리방침|©|naver corp|도움말|고객센터/i.test(text)) {
-    return true;
-  }
-  if (/policy\.naver\.com|help\.naver\.com|www\.navercorp\.com/i.test(url)) {
-    return true;
-  }
-  if (/^support\./i.test(host) || /(^|\.)support\./i.test(host)) {
+  if (/^(search|search\.shopping|shopping|nid|m\.search)\.naver\.com$/.test(host)) return true;
+  if (host==='help.naver.com' && /\/(?:support\/)?alias\/search\//.test(new URL(url).pathname)) return true;
+  if (/(^|\.)google\.[a-z.]+$/.test(host) && /^\/(search|preferences|accounts|sorry)/.test(new URL(url).pathname)) return true;
+  if (/^(검색옵션|검색\s*고객센터|개인정보처리방침|도움말|고객센터)$/i.test(String(text).trim())) {
     return true;
   }
   if (/\b(friend1004|jupiter\d+|apollon\d+|dionysus\d+)\.com\b/i.test(url)) {
@@ -207,7 +206,7 @@ function isLowValueResult(text, url) {
   if (/^keep\.naver\.com$/i.test(host)) {
     return true;
   }
-  return /\/privacy|\/policy|\/help|\/support|\/feedback|\/websearch/i.test(joined);
+  return /\/privacy(?:[/?#]|$)|\/feedback(?:[/?#]|$)|\/websearch(?:[/?#]|$)/i.test(url);
 }
 
 function hostFromUrl(url) {
@@ -220,7 +219,7 @@ function hostFromUrl(url) {
 
 function isUnsupportedContentUrl(url) {
   const normalized = String(url || "").split("#")[0].split("?")[0];
-  return UNSUPPORTED_CONTENT_URL_PATTERN.test(normalized);
+  return !/\.(pdf|hwp|hwpx)$/i.test(normalized) && UNSUPPORTED_CONTENT_URL_PATTERN.test(normalized);
 }
 
 function isOfficialDomain(url) {
@@ -321,7 +320,7 @@ function requiresIndependentSourceEvidence(options) {
 function buildSearchProfile(options) {
   const independentEvidence = requiresIndependentSourceEvidence(options);
   return {
-    strictEvidence: requiresStrictSourceEvidence(options) || independentEvidence,
+    strictEvidence: options.trustBlogAsSource!==true && options.searchNeed==='strict',
     authorityEvidence: requiresAuthoritySourceEvidence(options),
     independentEvidence,
     keywordPhrases: splitKeywordPhrases(options.keyword),
@@ -377,15 +376,16 @@ function candidateFreshnessSignals(text, profile = {}) {
   return { staleYear, currentYearSignal, recentMonthSignal };
 }
 
-function parseLinks(html, provider) {
+function parseLinks(html, provider, channel = 'web') {
   const results = [];
   const seen = new Set();
   const regex = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
   let match;
   while ((match = regex.exec(html)) && results.length < 40) {
-    let url = match[1];
+    let url = decodeEntities(match[1]);
     const title = stripTags(match[2]);
     if (!title || title.length < 6) continue;
+    if (/^(지도|자세히 보기|이용약관|개인정보처리방침|검색 고객센터|전체서비스)(?:\s*새 창 열림)?$|^©\s*NAVER/i.test(title)) continue;
     if (provider === "google" && url.startsWith("/url?")) {
       const parsed = new URL(url, "https://www.google.com");
       url = parsed.searchParams.get("q") || "";
@@ -395,8 +395,8 @@ function parseLinks(html, provider) {
     }
     if (!/^https?:\/\//i.test(url)) continue;
     if (isLikelyAd(title, url)) continue;
-    if (isLowValueResult(title, url)) continue;
-    const key = url.replace(/[#?].*$/, "");
+    if (isLowValueResult(title, url) || !channelAllows(url, channel, provider)) continue;
+    const key = canonicalUrl(url);
     if (seen.has(key)) continue;
     seen.add(key);
     results.push({ provider, title, url });
@@ -404,6 +404,17 @@ function parseLinks(html, provider) {
   return results;
 }
 
+function channelAllows(url, channel, provider) {
+  try {
+    const u=new URL(url);
+    if(channel==='blog') {
+      if(/^(m\.)?blog\.naver\.com$/.test(u.hostname))return /^\/[^/]+\/\d+\/?$/.test(u.pathname) || (/\/PostView\.naver$/i.test(u.pathname) && /^\d+$/.test(u.searchParams.get('logNo') || ''));
+      return provider==='google' && /\.tistory\.com$/.test(u.hostname) && u.pathname!=='/';
+    }
+    if(channel==='news' && provider==='naver')return /(^|\.)(news|sports|entertain)\.naver\.com$/.test(u.hostname) && /article|read/.test(u.pathname);
+    return true;
+  }catch{return false;}
+}
 function normalizeOutboundUrl(rawUrl, baseUrl = "") {
   try {
     let url = new URL(decodeEntities(rawUrl), baseUrl || "https://search.naver.com").toString();
@@ -428,16 +439,28 @@ function extractAuthorityLinks(html, baseUrl = "") {
   let match;
   while ((match = regex.exec(String(html || ""))) && results.length < MAX_AUTHORITY_LINK_CANDIDATES) {
     const url = normalizeOutboundUrl(match[1], baseUrl);
-    if (!url) continue;
+    if (!url || /getImageFile|\.(?:png|jpe?g|gif|svg|webp)(?:[?#]|$)/i.test(url)) continue;
     if (!isOfficialDomain(url) && !isInstitutionalDomain(url)) continue;
+    const parsed=new URL(url), label=stripTags(match[2]);
+    if(canonicalUrl(url)===canonicalUrl(baseUrl) || /^(본문|주메뉴).*바로가기|^(홈|HOME|정책정보|행사정보|로그인|회원가입|목록|메뉴열기)$/i.test(label))continue;
+    if(/^\/$|\/(?:main|index)\.(?:do|html?)$/i.test(parsed.pathname) || /(?:View|List)\.do$/i.test(parsed.pathname) && ![...parsed.searchParams.keys()].some(k=>/id|seq|no/i.test(k)))continue;
     if (isLowValueResult("", url) || isUnsupportedContentUrl(url)) continue;
-    const key = url.replace(/[#?].*$/, "");
+    const key = canonicalUrl(url);
     if (seen.has(key)) continue;
     seen.add(key);
     const title = stripTags(match[2]) || hostFromUrl(url);
     results.push({ provider: "source-link", title, url });
   }
   return results;
+}
+
+function extractAttachmentLinks(html,baseUrl) {
+  const output=[];const pattern=/<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;let match;
+  while((match=pattern.exec(html)) && output.length<3){
+    const url=normalizeOutboundUrl(match[1],baseUrl),title=stripTags(match[2]);if(!url)continue;
+    if(require('./mediaFilter').isVideoUrl(url))continue;
+    if(!/getImageFile|\.(?:png|jpe?g|gif|svg|webp)(?:[?#]|$)/i.test(url) && (/\.(pdf|hwp|hwpx)(?:[?#]|$)/i.test(url) || (/pdf|hwpx?|한글파일|다운로드/i.test(title) && /download|filedown|file|attach/i.test(url))))output.push({provider:'attachment',title,url});
+  }return output;
 }
 
 function candidateMatchesSearchIntent(candidate, options) {
@@ -618,20 +641,21 @@ async function mapLimit(items, limit, mapper) {
   return results;
 }
 
-async function fetchCandidateContent(candidate) {
+async function fetchCandidateContent(candidate, options={}, log=()=>{}) {
   const attempts = [candidate.url];
   const mobileUrl = mobileNaverBlogUrl(candidate.url);
   if (mobileUrl) attempts.push(mobileUrl);
   const outboundLinks = [];
+  let extractionError='';
 
   for (const attemptUrl of attempts) {
     try {
-      let html = await withTimeout(
-        fetchText(attemptUrl),
-        CANDIDATE_FETCH_TIMEOUT_MS,
-        "본문 추출 후보 요청 시간이 초과되었습니다."
-      );
-      outboundLinks.push(...extractAuthorityLinks(html, attemptUrl));
+      let html = await readSourceDocument(attemptUrl,{onProgress:message=>log(message,'info'),maxPages:40,maxOcrPages:4});
+      if(isLowValueResult(candidate.title,html.url) || (['naver','google'].includes(candidate.provider) && !channelAllows(html.url,normalizeSearchChannel(options.searchChannel),candidate.provider)))throw new Error('검색 범위 밖으로 이동한 원문을 제외했습니다.');
+      if(typeof html.text==='string')return {...candidate,fetchedUrl:html.url,contentLength:html.text.length,fullText:html.text,excerpt:evidenceExcerpt(html.text,(options.searchQueries || []).join(' '),MAX_EXCERPT_CHARS),outboundLinks:[],extractionNote:html.extractionNote || ''};
+      const resolvedUrl=html.url;
+      html=html.html;
+      outboundLinks.push(...extractAttachmentLinks(html,attemptUrl),...((isOfficialDomain(attemptUrl)||isInstitutionalDomain(attemptUrl))?[]:extractAuthorityLinks(html, attemptUrl)));
       const frameUrl = findNaverBlogFrame(html, attemptUrl);
       if (frameUrl) {
         html = await withTimeout(
@@ -639,7 +663,7 @@ async function fetchCandidateContent(candidate) {
           CANDIDATE_FETCH_TIMEOUT_MS,
           "네이버 블로그 본문 프레임 요청 시간이 초과되었습니다."
         );
-        outboundLinks.push(...extractAuthorityLinks(html, frameUrl));
+        outboundLinks.push(...extractAttachmentLinks(html,frameUrl),...extractAuthorityLinks(html, frameUrl));
       }
       const description = extractMetaDescription(html);
       const readable = extractReadableText(html);
@@ -647,13 +671,16 @@ async function fetchCandidateContent(candidate) {
       if (text && text.length >= 80) {
         return {
           ...candidate,
-          fetchedUrl: attemptUrl,
+          fetchedUrl: resolvedUrl,
           contentLength: text.length,
-          excerpt: text.slice(0, MAX_EXCERPT_CHARS),
+          fullText:text,
+          excerpt: evidenceExcerpt(text, (options.searchQueries || []).join(" "), MAX_EXCERPT_CHARS),
           outboundLinks: uniqueCandidates(outboundLinks).slice(0, MAX_AUTHORITY_LINK_CANDIDATES)
         };
       }
-    } catch {
+    } catch(error) {
+      extractionError=error.message;
+      log(`원문 추출 실패: ${candidate.url} · ${error.message}`, 'warn');
       // Try the next URL form.
     }
   }
@@ -662,6 +689,7 @@ async function fetchCandidateContent(candidate) {
     ...candidate,
     fetchedUrl: "",
     contentLength: 0,
+    extractionError,
     excerpt: "",
     outboundLinks: uniqueCandidates(outboundLinks).slice(0, MAX_AUTHORITY_LINK_CANDIDATES)
   };
@@ -671,7 +699,8 @@ function uniqueCandidates(items) {
   const seen = new Set();
   const output = [];
   for (const item of Array.isArray(items) ? items : []) {
-    const key = String(item?.url || "").replace(/[#?].*$/, "");
+    if(require('./mediaFilter').isVideoUrl(item?.url))continue;
+    const key = canonicalUrl(item?.url);
     if (!key || seen.has(key)) continue;
     seen.add(key);
     output.push(item);
@@ -755,9 +784,9 @@ function buildSearchUrl(provider, template, topic, keyword, topicMode, querySuff
   return `https://www.google.com/search?q=${query}&num=20&hl=ko`;
 }
 
-async function providerSearch(provider, options, querySuffix = "", queryOverride = "") {
+async function providerSearch(provider, options, querySuffix = "", queryOverride = "", fetcher=fetchText) {
   const template = provider === "naver" ? naverSearchTemplateFor(options) : options.googleSearchUrl;
-  const url = buildSearchUrl(
+  let url = buildSearchUrl(
     provider,
     template,
     options.topic,
@@ -766,8 +795,17 @@ async function providerSearch(provider, options, querySuffix = "", queryOverride
     querySuffix,
     queryOverride
   );
-  const html = await fetchText(url);
-  return parseLinks(html, provider);
+  if(provider==='google' && normalizeSearchChannel(options.searchChannel)==='blog'){
+    const scoped=new URL(url),q=scoped.searchParams.get('q');
+    if(q===null)throw new Error('블로그 범위를 적용할 수 없는 Google 검색 URL입니다.');
+    scoped.searchParams.set('q','('+q+') (site:blog.naver.com OR site:tistory.com)');url=scoped.href;
+  }
+  const html = await fetcher(url);
+  const results=parseLinks(html, provider, normalizeSearchChannel(options.searchChannel));
+  // Search engines may ignore OR/site syntax. Enforce the requested host scope
+  // before treating unrelated results as readable evidence and suppressing fallback.
+  const sites=[...String(queryOverride).matchAll(/(?:^|\s)site:([a-z0-9.-]+)/gi)].map(m=>m[1].toLowerCase());
+  return sites.length?results.filter(item=>sites.some(site=>{const host=hostFromUrl(item.url);return host===site || host.endsWith('.'+site);})):results;
 }
 
 function isStrongCandidate(item, profile) {
@@ -908,11 +946,9 @@ async function collectProviderCandidates(providers, options, log, querySuffix = 
     }
     try {
       log(`${provider.toUpperCase()} 검색을 시도합니다.`);
-      const optionVariants = provider === "naver" && control.includeNaverWebFallback === true
-        ? [options, { ...options, searchChannel: "web" }]
-        : [options];
+      const optionVariants = [options];
       for (const optionVariant of optionVariants) {
-        const results = await providerSearch(
+        const results = await (control.searchProvider || providerSearch)(
           provider,
           optionVariant,
           querySuffix,
@@ -929,23 +965,37 @@ async function collectProviderCandidates(providers, options, log, querySuffix = 
 }
 
 function shouldRunFallbackForSparseSelection(selected, attemptedProviders, primary, fallback, profile) {
-  if (profile.strictEvidence) return false;
   if (!["naver", "google"].includes(fallback)) return false;
   if (fallback === primary) return false;
   if (attemptedProviders instanceof Set && attemptedProviders.has(fallback)) return false;
-  return (Array.isArray(selected) ? selected.length : 0) < MIN_SELECTED_CANDIDATES_BEFORE_FALLBACK;
+  return (Array.isArray(selected) ? selected.length : 0) === 0;
 }
 
-async function collectSearchResults(options, log = () => {}) {
+function createRetrievalContext(){return {queries:new Map(),documents:new Map(),searchRequests:0,documentRequests:0,maxSearchRequests:24,maxDocumentRequests:60,attachmentRequests:0,maxAttachmentRequests:8,events:[]};}
+async function collectSearchResults(options, log = () => {}, dependencies = {}) {
+  const cache=dependencies.context || createRetrievalContext();
+  let stageDocuments=0,budgetBlocked=false;
+  const warnOnce=(key,message)=>{cache.budgetWarnings ||= new Set();if(!cache.budgetWarnings.has(key)){cache.budgetWarnings.add(key);log(message,'warn');}};
+  const discovery=options.retrievalStage==='discovery';
+  const originalSearch=dependencies.searchProvider || providerSearch;
+  const cachedSearch=async(provider,settings,suffix,query)=>{
+    const key=JSON.stringify([provider,normalizeSearchChannel(settings.searchChannel),String(query || buildQueryText(settings.topic,settings.keyword,settings.topicMode)).replace(/\s+/g,' ').trim().toLowerCase(),suffix || '',settings.naverSearchUrl || '',settings.googleSearchUrl || '']);
+    if(cache.queries.has(key)){log('검색 결과 재사용: '+query);return cache.queries.get(key);}
+    if(cache.searchRequests>=cache.maxSearchRequests){log('작업 검색 요청 한도에 도달하여 추가 요청을 중지합니다.','warn');return [];}
+    cache.searchRequests++;cache.events.push({type:'search',provider,channel:settings.searchChannel,query});
+    const pending=originalSearch(provider,settings,suffix,query).catch(error=>{cache.events.push({type:'search_error',query,reason:error.message});throw error;});
+    cache.queries.set(key,pending);return pending;
+  };
   const primary = String(options.primaryProvider || "naver").toLowerCase();
   const fallback = String(options.fallbackProvider || "google").toLowerCase();
-  const providers = [primary, fallback];
+  const providers = [primary];
+  log('검색 범위: '+normalizeSearchChannel(options.searchChannel)+' · '+primary.toUpperCase()+' 우선, 읽을 수 있는 결과가 없을 때만 '+fallback.toUpperCase()+' 대체 검색');
   const profile = buildSearchProfile(options);
   const queryVariants = normalizeSearchQueries(options.searchQueries);
   const attemptedProviders = new Set();
   const providerControl = {
-    forceAllProviders: profile.strictEvidence,
-    includeNaverWebFallback: profile.strictEvidence && normalizeSearchChannel(options.searchChannel) !== "web",
+    forceAllProviders: true,
+    searchProvider: cachedSearch,
     attemptedProviders
   };
   const collectRawCandidates = async (querySuffix = "", providerList = providers, control = providerControl) => {
@@ -966,26 +1016,26 @@ async function collectSearchResults(options, log = () => {}) {
     }
     return collected;
   };
-  const initialFreshnessSuffix = profile.highFreshness ? freshnessSearchSuffix(options) : "";
+  const initialFreshnessSuffix = queryVariants.length ? "" : profile.highFreshness ? freshnessSearchSuffix(options) : "";
   let all = await collectRawCandidates(initialFreshnessSuffix);
 
   const buildFilteredCandidates = (items) => {
     const seen = new Set();
     const filtered = items
       .filter((item) => {
-        const key = item.url.replace(/[#?].*$/, "");
+        const key = canonicalUrl(item.url);
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
       })
-      .filter((item) => !isLowValueResult(item.title, item.url))
-      .filter((item) => candidateMatchesSearchIntent(item, options));
-    return buildCandidateFetchList(filtered, profile, 20);
+      .filter((item) => !isLowValueResult(item.title, item.url) && channelAllows(item.url, normalizeSearchChannel(options.searchChannel), item.provider))
+      ;
+    return buildCandidateFetchList(filtered, profile, options.maxCandidates || 20);
   };
   let candidates = buildFilteredCandidates(all);
 
   if (!candidates.length && shouldRunFallbackForSparseSelection([], attemptedProviders, primary, fallback, profile)) {
-    log(`Selected source candidates below ${MIN_SELECTED_CANDIDATES_BEFORE_FALLBACK}; running fallback provider once: ${fallback.toUpperCase()}`);
+    log(`읽을 수 있는 결과가 없어 동일 채널로 대체 검색: ${fallback.toUpperCase()}`);
     const fallbackResults = await collectRawCandidates("", [fallback], { ...providerControl, forceAllProviders: true });
     all = [...all, ...fallbackResults];
     candidates = buildFilteredCandidates(all);
@@ -993,16 +1043,31 @@ async function collectSearchResults(options, log = () => {}) {
 
   if (!candidates.length) return [];
 
+  const contentCache = cache.documents;
   const enrichAndScore = async (items) => {
-    log(`검색 후보 ${items.length}개 본문 추출을 시도합니다.`);
+    const freshItems=items.filter(item=>!contentCache.has(canonicalUrl(item.url)));
+    log('새 원문 '+freshItems.length+'개 확인 · 기존 원문 '+(items.length-freshItems.length)+'개 재사용');
     let completed = 0;
     const enriched = await mapLimit(
       items,
       CONTENT_FETCH_CONCURRENCY,
       async (candidate) => {
-        const result = await fetchCandidateContent(candidate);
+        const key=canonicalUrl(candidate.url);
+        if (!contentCache.has(key)) {
+          if(cache.documentRequests>=cache.maxDocumentRequests || stageDocuments>=(options.maxStageDocuments || Infinity) || (discovery && (cache.discoveryDocuments || 0)>=24)){
+            budgetBlocked=true;warnOnce(options.retrievalStage || 'all','원문 수집 예산 도달: '+(options.retrievalStage || '전체')+' 단계의 새 다운로드를 중지하고 확보한 자료를 사용합니다.');return null;
+          }
+          if(candidate.provider==='attachment' || /fileDown|download|\.(pdf|hwpx?)(?:[?#]|$)/i.test(candidate.url)){if(cache.attachmentRequests>=cache.maxAttachmentRequests || (discovery && (cache.discoveryAttachments || 0)>=3)){budgetBlocked=true;warnOnce('attachments','첨부 수집 예산 도달: 확보한 자료를 사용합니다.');return null;}cache.attachmentRequests++;if(discovery)cache.discoveryAttachments=(cache.discoveryAttachments || 0)+1;}
+          stageDocuments++;if(discovery)cache.discoveryDocuments=(cache.discoveryDocuments || 0)+1;
+          cache.documentRequests++;
+          contentCache.set(key,(dependencies.fetchCandidate || fetchCandidateContent)(candidate,options,log));
+        }
+        const cached=await contentCache.get(key);
+        const anchors=(options.evidenceRequests || []).filter(r=>canonicalUrl(r.sourceUrl)===key).flatMap(r=>r.anchors || []);
+        const result=cached?{...cached,...(candidate.sourcePage?{sourcePage:candidate.sourcePage}:{}),excerpt:cached.fullText?evidenceExcerpt(cached.fullText,(options.searchQueries || []).join(' '),MAX_EXCERPT_CHARS,anchors):cached.excerpt}:null;
+        cache.events.push({type:'document',url:candidate.url,readable:Boolean(result?.excerpt),sourcePage:candidate.sourcePage || '',error:result?.extractionError || ''});
         completed += 1;
-        if (completed === 1 || completed % 2 === 0 || completed === items.length) {
+        if (freshItems.length && completed === items.length) {
           log(`본문 추출 진행: ${completed}/${items.length}`);
         }
         return result;
@@ -1016,13 +1081,7 @@ async function collectSearchResults(options, log = () => {}) {
       const relevance = scoreCandidate(item, commonTokens, options, profile);
       return { ...item, relevance };
     });
-    const eligible = scoredAll.filter((item) => {
-      const hasTopicTokens = tokenize(options.topic || "").length > 0;
-      const hasTopicMatch = Array.isArray(item.relevance.topicMatchedTerms) && item.relevance.topicMatchedTerms.length > 0;
-      const hasKeywordMatch = Array.isArray(item.relevance.keywordMatchedTerms) && item.relevance.keywordMatchedTerms.length > 0;
-      const priorityEvidence = isPrioritySourceCandidate(item, profile) && (hasTopicMatch || hasKeywordMatch);
-      return item.relevance.score >= 3 && ((!hasTopicTokens || hasTopicMatch) || priorityEvidence);
-    });
+    const eligible = scoredAll; // Rank retrieval hints without discarding semantic alternatives.
     const sorted = eligible.sort((a, b) => b.relevance.score - a.relevance.score);
     const priorityEvidence = sorted.filter((item) => isPrioritySourceCandidate(item, profile));
     const scored = profile.strictEvidence
@@ -1033,48 +1092,31 @@ async function collectSearchResults(options, log = () => {}) {
   };
 
   let { selected, withContent } = await enrichAndScore(candidates);
-  if (shouldRunFallbackForSparseSelection(selected, attemptedProviders, primary, fallback, profile)) {
-    log(`Selected source candidates below ${MIN_SELECTED_CANDIDATES_BEFORE_FALLBACK}; running fallback provider once: ${fallback.toUpperCase()}`);
+  if (!budgetBlocked && shouldRunFallbackForSparseSelection(selected, attemptedProviders, primary, fallback, profile)) {
+    log(`읽을 수 있는 결과가 없어 동일 채널로 대체 검색: ${fallback.toUpperCase()}`);
     const fallbackResults = await collectRawCandidates("", [fallback], { ...providerControl, forceAllProviders: true });
     all = [...all, ...fallbackResults];
     candidates = buildFilteredCandidates(all);
     ({ selected, withContent } = await enrichAndScore(candidates));
   }
-  if (profile.authorityEvidence && !selected.some((item) => isStrongCandidate(item, profile))) {
-    const authorityLinkCandidates = uniqueCandidates((selected.length ? selected : withContent)
-      .flatMap((item) => Array.isArray(item?.outboundLinks) ? item.outboundLinks : []))
-      .slice(0, MAX_AUTHORITY_LINK_CANDIDATES);
-    if (authorityLinkCandidates.length) {
-      log(`블로그 본문에 명시된 공식/기관 출처 ${authorityLinkCandidates.length}개를 보강 후보로 확인합니다.`, "info");
-      candidates = mergeCandidateLists(authorityLinkCandidates, candidates, 20);
-      ({ selected, withContent } = await enrichAndScore(candidates));
-    } else {
-      log("블로그 본문에서 직접 공식 링크를 찾지 못해 기관명/사업명 단서로 공식사이트를 재검색합니다.", "info");
-    }
-  }
-  if (profile.strictEvidence && !selected.some((item) => isStrongCandidate(item, profile))) {
-    const suffix = profile.independentEvidence
-      ? focusedIndependentSearchSuffix(options, profile, selected.length ? selected : withContent)
-      : focusedOfficialSearchSuffix(options, profile, selected.length ? selected : withContent);
-    const freshnessSuffix = profile.highFreshness ? freshnessSearchSuffix(options) : "";
-    const refinedSuffix = [suffix, freshnessSuffix].filter(Boolean).join(" ");
-    if (refinedSuffix) {
-      log(profile.authorityEvidence
-        ? "공식/기관 근거가 필요한 검색으로 판단되어 공식사이트 보강 검색을 실행합니다."
-        : profile.independentEvidence
-          ? "독립 신뢰 근거가 필요한 검색으로 판단되어 넓은 웹 보강 검색을 실행합니다."
-          : "현재성/신뢰 근거가 필요한 검색으로 판단되어 보강 검색합니다.", "info");
-      const refined = await collectRawCandidates(refinedSuffix);
-      const authorityRefined = refined.filter((item) => isOfficialDomain(item.url) || isInstitutionalDomain(item.url));
-      const independentRefined = refined.filter((item) => isIndependentEditorialSource(item.url));
-      candidates = mergeCandidateLists([...authorityRefined, ...independentRefined, ...refined], candidates, 20);
-      ({ selected, withContent } = await enrichAndScore(candidates));
-    }
+  // Follow explicitly cited sources, then their attachments; never silently widen search.
+  // Two levels allow blog -> official notice -> HWP/PDF without recursive crawling.
+  const followed=new Set(candidates.map(c=>canonicalUrl(c.url)));
+  if(profile.strictEvidence)for(let depth=0;depth<2;depth++){
+    const links=uniqueCandidates((selected.length?selected:withContent).flatMap(item=>(item.outboundLinks || []).map(link=>({...link,sourcePage:item.url}))))
+      .filter(link=>!followed.has(canonicalUrl(link.url)))
+      .sort((a,b)=>Number(b.provider==='attachment')-Number(a.provider==='attachment'))
+      .slice(0,MAX_AUTHORITY_LINK_CANDIDATES);
+    if(!links.length)break;
+    for(const link of links)followed.add(canonicalUrl(link.url));
+    log('본문에 연결된 출처·첨부 '+links.length+'개 확인 (검색 채널 확장 없음)');
+    candidates=mergeCandidateLists(links,candidates,20);
+    ({selected,withContent}=await enrichAndScore(candidates));
   }
 
   if (!withContent.length) {
-    log("본문 추출에 성공한 후보가 없어 제목/URL 후보만 사용합니다.", "warn");
-    return candidates;
+    log("읽을 수 있는 원문이 없어 근거 없는 재검토를 생략합니다.", "warn");
+    return [];
   }
   log(`본문 추출 ${withContent.length}개, 공통 주제 후보 ${selected.length}개를 사용합니다.`);
   return selected.map((item, index) => ({
@@ -1085,7 +1127,9 @@ async function collectSearchResults(options, log = () => {}) {
     fetchedUrl: item.fetchedUrl,
     contentLength: item.contentLength,
     excerpt: item.excerpt,
+    sourcePage: item.sourcePage || "",
     outboundLinks: Array.isArray(item.outboundLinks) ? item.outboundLinks : [],
+    extractionNote:item.extractionNote || "",
     relevance: item.relevance || { score: 0, matchedTerms: [] }
   }));
 }
@@ -1137,9 +1181,7 @@ function summarizeSourceQuality(searchResults, _topicMode = "manual", options = 
   const authorityRequired = strictEvidence && results.some((item) => item?.relevance?.authorityEvidence === true);
   const independentRequired = strictEvidence && results.some((item) => item?.relevance?.independentEvidence === true);
   const usableRelevant = usable.filter(hasDirectRelevance);
-  const status = strictEvidence
-    ? strongEvidence.length ? "usable" : "insufficient"
-    : usableRelevant.length ? "usable" : "insufficient";
+  const status = usable.length ? "available" : "insufficient";
   const compactSource = (item, index) => ({
     sourceId: String(item?.sourceId || `source-${index + 1}`),
     provider: String(item?.provider || ""),
@@ -1165,28 +1207,15 @@ function summarizeSourceQuality(searchResults, _topicMode = "manual", options = 
     independentEvidenceCandidates: independentEvidence.length,
     independentEvidenceSources: independentEvidence.slice(0, 6).map(compactSource),
     trustedBlogDiscoveryCandidates: trustedBlogDiscovery.length,
-    reason: status === "usable"
-      ? strictEvidence
-        ? authorityRequired
-          ? "검색 후보에서 공식/기관 근거와 주제 직접성이 함께 확인되었습니다."
-          : independentRequired
-            ? "검색 후보에서 독립 신뢰 근거와 주제 직접성이 함께 확인되었습니다."
-          : "검색 후보에서 현재성/신뢰 근거와 주제 직접성이 함께 확인되었습니다."
-        : "검색 후보에서 주제와 직접 관련된 본문 발췌가 확보되었습니다."
-      : strictEvidence
-        ? authorityRequired && trustedBlogDiscovery.length
-          ? "블로그 후보는 주제 단서로 확인되었지만 공식/기관 근거가 부족합니다. 블로그에 명시된 기관명·사업명·공고명을 바탕으로 공식 원문 보강 검색이 필요합니다."
-          : independentRequired && trustedBlogDiscovery.length
-            ? "블로그 후보는 주제 단서로 확인되었지만 독립 신뢰 근거가 부족합니다. 공식 원문 또는 독립 편집 매체 보강 검색이 필요합니다."
-          : "신뢰 가능한 현재성 근거와 주제 직접성이 함께 확인되는 검색 후보가 부족합니다."
-        : "검색 후보에서 주제와 직접 관련된 본문 발췌가 부족합니다. 주제/키워드 오타 또는 검색 결과 불일치 가능성이 있습니다."
+    reason: usable.length ? "발췌 확보. 사실성·현재성·직접 관련성은 원문을 읽은 모델이 판단합니다." : "원문 발췌가 부족합니다. 제목과 URL만으로 사실을 확정하지 마세요."
   };
 }
 
 module.exports = {
-  collectSearchResults,
+  collectSearchResults,createRetrievalContext,
   summarizeSourceQuality,
   _private: {
+    fetchCandidateContent,extractAttachmentLinks,stripTags,parseLinks,providerSearch,channelAllows,
     naverSearchTemplateFor,
     buildQueryText,
     buildSearchProfile,

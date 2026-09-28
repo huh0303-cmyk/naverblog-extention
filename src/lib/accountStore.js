@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
+const {normalizeTistoryBlogId} = require('./tistoryTarget');
 
 const DEFAULT_ACCOUNT_STORE = {
   selectedAccountId: "",
@@ -58,8 +59,9 @@ function normalizeCategory(category) {
 }
 
 function normalizeAccount(account) {
-  // Existing profile folders were named with naverId. Keep this legacy key only
-  // so upgrades reuse the same browser profile; it is never used to fill login forms.
+  // Deleted samples must never leave an active style behind, including legacy data.
+  if(!account?.sampleImagePath)account={...account,sampleImageHash:'',sampleImageUpdatedAt:'',imageStylePrompt:'',imageStylePromptUpdatedAt:'',imageStylePromptStatus:'missing',imageStylePromptSourceImageHash:'',imageStylePromptError:''};
+  // Legacy identifier is retained for settings compatibility, never for login input.
   const naverId = String(account?.naverId || account?.idValue || "").trim();
   const blogId = String(account?.blogId || account?.naverBlogId || naverId || "").trim();
   const id = String(account?.id || "").trim() || makeId("acct");
@@ -72,6 +74,7 @@ function normalizeAccount(account) {
     label: String(account?.label || blogId || naverId || "Naver 계정").trim(),
     naverId,
     blogId,
+    tistoryBlogId: normalizeTistoryBlogId(account?.tistoryBlogId),
     sampleImagePath: String(account?.sampleImagePath || ""),
     sampleImageHash: String(account?.sampleImageHash || ""),
     sampleImageUpdatedAt: String(account?.sampleImageUpdatedAt || ""),
@@ -83,7 +86,7 @@ function normalizeAccount(account) {
     imageStylePromptSourceImageHash: String(account?.imageStylePromptSourceImageHash || ""),
     imageStylePromptError: String(account?.imageStylePromptError || ""),
     checked: account?.checked !== false,
-    sessionStatus: ["valid", "expired", "unknown"].includes(account?.sessionStatus)
+    sessionStatus: ["valid", "expired", "unknown", "disconnected", "security_check", "account_mismatch", "checking"].includes(account?.sessionStatus)
       ? account.sessionStatus
       : "unknown",
     sessionCheckedAt: String(account?.sessionCheckedAt || ""),

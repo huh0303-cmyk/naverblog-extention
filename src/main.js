@@ -1,15 +1,35 @@
-const { app, BrowserWindow, ipcMain, shell, dialog } = require("electron");
+const { app, BrowserWindow, ipcMain, shell, dialog, clipboard } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 const crypto = require("node:crypto");
+if (process.env.BLOGAUTO_USER_DATA) app.setPath('userData', path.resolve(process.env.BLOGAUTO_USER_DATA));
+// Acquire the lock before Chromium opens the shared cache or the bridge starts.
+if (!app.requestSingleInstanceLock()) {
+  console.log('이미 실행 중인 앱 창으로 전환합니다.');
+  app.exit(0);
+}
+app.on('second-instance', () => {
+  const focusWindow = () => {
+    const window = BrowserWindow.getAllWindows()[0];
+    if (!window) return;
+    if (window.isMinimized()) window.restore();
+    window.show();
+    window.focus();
+  };
+  if (app.isReady()) focusWindow();
+  else app.whenReady().then(focusWindow);
+});
 const zlib = require("node:zlib");
 const { pathToFileURL } = require("node:url");
 const { readHistory, appendHistory, ensureRuntimeFiles } = require("./lib/history");
-const { createEmbedding, cosineSimilarity } = require("./lib/embedding");
-const { collectSearchResults, summarizeSourceQuality } = require("./lib/search");
+const { createEmbedding } = require("./lib/embedding");
+const { createRetrievalContext, summarizeSourceQuality } = require("./lib/search");
 const { runCodexGeneration, fetchCodexUsageSnapshot } = require("./lib/codexRunner");
+const {saveStyleResult}=require('./lib/accountImageStyle');
 const { normalizeAgentResult, getPreviewImages } = require("./lib/imageAssets");
 const { publishToNaver, checkNaverSession, verifyOpenNaverSession } = require("./lib/naverPublisher");
+const {TISTORY_ACCOUNT_ID, tistoryAccount}=require('./lib/tistoryTarget');
+const {publishSequence}=require('./lib/publishSequence');
 const { publishToTistory, checkTistorySession } = require("./lib/tistoryPublisher");
 const { ensureSettingsFile, normalizeCodexModel, normalizeImageAspectRatio, normalizeMaxBodyImages, resolveCodexCmdPath, readSettings, writeSettings } = require("./lib/settings");
 const {
@@ -20,6 +40,21 @@ const {
   getAccountProfileDir
 } = require("./lib/accountStore");
 
+const { configureBridge, getBridge } = require('./lib/extensionBridge');
+const {pendingPublishState,cancelPendingPublish}=require('./lib/pendingPublish');
+function pendingPublishBusy(){return Boolean(activeJob) || [...getBridge().tasks.values()].some(t=>t.type==='publish' && ['queued','running'].includes(t.state));}
+const {retrieveResearch}=require('./lib/researchRetrieval');
+let bridgeError = '';
+function connectionStore() {
+  const root=getRuntimeRoot(); const store=withAccountImageUrls(root,readAccountStore(root,readSettings(root)));
+  return {...store, tistoryConnection:getBridge().snapshot(TISTORY_ACCOUNT_ID), accounts:store.accounts.map(a=>({...a,sessionStatus:getBridge().snapshot(a.id).status,sessionCheckedAt:getBridge().snapshot(a.id).checkedAt,connection:getBridge().snapshot(a.id)}))};
+}
+function prepareExtension() {
+  const source=app.isPackaged ? path.join(process.resourcesPath,'extension') : path.join(__dirname,'..','extension');
+  const destination=path.join(app.getPath('userData'),'chrome-extension');
+  fs.mkdirSync(destination,{recursive:true}); fs.cpSync(source,destination,{recursive:true});
+  clipboard.writeText(destination); return destination;
+}
 let mainWindow;
 let activeJob = null;
 const activeNaverSessions = new Map();
@@ -35,8 +70,11 @@ function createWindow() {
     height: 920,
     minWidth: 980,
     minHeight: 720,
-    backgroundColor: "#f4f7f5",
-    title: "Naver Blog Automator",
+    backgroundColor: "#11151d",
+    title: "네이버 블로그 자동화 by @복사장의생존발악",
+    icon: path.join(__dirname, 'assets', 'app-icon.png'),
+    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'hidden',
+    ...(process.platform === 'darwin' ? {} : {titleBarOverlay: {color:'#152030', symbolColor:'#edf3fc', height:40}}),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -44,6 +82,7 @@ function createWindow() {
     }
   });
 
+  mainWindow.setMenu(null);
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
     console.error(`Renderer process gone: ${details.reason || "unknown"} (${details.exitCode || 0})`);
@@ -56,20 +95,7 @@ function getRuntimeRoot() {
     return path.resolve(overrideRoot);
   }
 
-  if (app.isPackaged) {
-    const portableDir = process.env.PORTABLE_EXECUTABLE_DIR;
-    if (portableDir && fs.existsSync(portableDir)) {
-      return path.join(portableDir, "runtime");
-    }
-
-    const portableFile = process.env.PORTABLE_EXECUTABLE_FILE;
-    if (portableFile && fs.existsSync(portableFile)) {
-      return path.join(path.dirname(portableFile), "runtime");
-    }
-
-    return path.join(path.dirname(process.execPath), "runtime");
-  }
-  return path.join(app.getAppPath(), "runtime");
+  return path.join(app.getPath('userData'), 'runtime');
 }
 
 function emit(channel, payload) {
@@ -82,12 +108,15 @@ function safeLog(jobId, message, level = "info", agent = "main") {
   let text = String(message || "")
     .replace(/\u001b\[[0-9;]*m/g, "")
     .replace(/password\s*[:=]\s*\S+/gi, "password=[redacted]");
+  if (/프롬프트\s*크기\s*:|토큰\s*사용량\s*:|^tokens?\s+used\b/i.test(text)) return;
   if (/^mcp:/i.test(text) || /codex_core_plugins::manifest/i.test(text)) {
     return;
   }
   if (text.includes("Call log:")) {
     text = text.split("Call log:")[0].trim();
   }
+  const logDir=path.join(getRuntimeRoot(),'jobs',String(jobId));
+  try{if(fs.existsSync(logDir))fs.appendFileSync(path.join(logDir,'events.jsonl'),JSON.stringify({jobId,level,agent,message:text,at:new Date().toISOString()})+'\n');}catch{/* Log persistence must not interrupt generation. */}
   emit("job:log", {
     jobId,
     level,
@@ -134,7 +163,7 @@ function withAccountImageUrls(runtimeRoot, store) {
 }
 
 function emitAccountStore(runtimeRoot) {
-  emit("accounts:update", withAccountImageUrls(runtimeRoot, readAccountStore(runtimeRoot, readSettings(runtimeRoot))));
+  emit("accounts:update", connectionStore());
 }
 
 function sessionKeyFor(account, browserProfileDir) {
@@ -232,31 +261,20 @@ function buildTistoryTestArticle() {
   ].join("\n");
 }
 
-function detectChromeInstall() {
-  const candidates = [
-    process.env.PROGRAMFILES && path.join(process.env.PROGRAMFILES, "Google", "Chrome", "Application", "chrome.exe"),
-    process.env["PROGRAMFILES(X86)"] && path.join(process.env["PROGRAMFILES(X86)"], "Google", "Chrome", "Application", "chrome.exe"),
-    process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, "Google", "Chrome", "Application", "chrome.exe")
-  ].filter(Boolean);
-  const chromePath = candidates.find((candidate) => fs.existsSync(candidate));
-  return {
-    available: Boolean(chromePath),
-    path: chromePath || ""
-  };
-}
+function detectChromeInstall(){const chromePath=require('./lib/chromeLauncher').findChrome();return {available:Boolean(chromePath),path:chromePath};}
 
 async function closeNaverSession(key) {
   const session = activeNaverSessions.get(key);
   if (!session) return;
   activeNaverSessions.delete(key);
-  await session.context?.close().catch(() => {});
+
 }
 
 async function closeTistorySession(key) {
   const session = activeTistorySessions.get(key);
   if (!session) return;
   activeTistorySessions.delete(key);
-  await session.context?.close().catch(() => {});
+
 }
 
 function reusableNaverSession(key) {
@@ -285,21 +303,12 @@ function sanitizeNaverTag(value) {
     .trim();
 }
 
-function buildTags(topic, keyword, articleTags) {
-  const raw = [
-    topic,
-    keyword,
-    ...(Array.isArray(articleTags) ? articleTags : [])
-  ]
-    .flatMap((item) => String(item || "").split(/[,\n#]+/))
-    .map(sanitizeNaverTag)
-    .filter(Boolean);
-
-  return [...new Set(raw)].slice(0, 29);
+function buildTags(_topic,_keyword,articleTags) {
+  return [...new Set((Array.isArray(articleTags)?articleTags:[]).map(sanitizeNaverTag).filter(Boolean))].slice(0,10);
 }
 
 function clearPendingNaverPublishDraft(runtimeRoot) {
-  writeSettings(runtimeRoot, { pendingNaverPublishDraft: null });
+  writeSettings(runtimeRoot, { pendingNaverPublishDraft: null, pendingGenerationDraft: null });
 }
 
 function pendingDraftMatches(draft, { account, blogId, category } = {}) {
@@ -447,10 +456,10 @@ function normalizeResearchLaneResult(researchResult, lanePlan) {
     .map((query) => String(query || "").replace(/\s+/g, " ").trim())
     .filter(Boolean)
     .filter((query) => {
-      if (query.length > 120) return false;
+      if (query.length > 140) return false;
       const lower = query.toLowerCase();
       const matchedLaneCount = lanePhrases.filter((phrase) => phrase && lower.includes(phrase)).length;
-      return matchedLaneCount <= 2;
+      return true; // Related/nested keyword phrases must not invalidate a specific query.
     })
     .slice(0, 4);
   return {
@@ -484,7 +493,7 @@ function mergeSearchResults(...groups) {
   const seen = new Set();
   for (const group of groups) {
     for (const item of Array.isArray(group) ? group : []) {
-      const key = String(item?.url || item?.fetchedUrl || "").replace(/[#?].*$/, "");
+      const key = require('./lib/evidenceText').canonicalUrl(item?.url || item?.fetchedUrl);
       if (!key || seen.has(key)) continue;
       seen.add(key);
       merged.push(item);
@@ -492,14 +501,12 @@ function mergeSearchResults(...groups) {
   }
   return merged.slice(0, 20).map((item, index) => ({
     ...item,
-    sourceId: item.sourceId || `${item.provider || "source"}-${index + 1}`
+    sourceId: 'src-' + crypto.createHash('sha256').update(item.url || item.fetchedUrl).digest('hex').slice(0, 16)
   }));
 }
 
 function selectSearchTopicForResearch(researchResult, context = {}) {
-  const topicMode = String(context.topicMode || "manual").toLowerCase();
   const directTopic = String(context.topic || "").trim();
-  if (topicMode === "manual" && directTopic) return directTopic;
   return String(
     researchResult?.finalTitle
     || researchResult?.selectedTitle
@@ -521,214 +528,6 @@ function uniqueSearchQueries(values, limit = 4) {
     if (queries.length >= limit) break;
   }
   return queries;
-}
-
-function flattenSearchIntentParts(value, output = []) {
-  if (value == null) return output;
-  if (Array.isArray(value)) {
-    for (const item of value) flattenSearchIntentParts(item, output);
-    return output;
-  }
-  if (typeof value === "object") {
-    for (const item of Object.values(value)) flattenSearchIntentParts(item, output);
-    return output;
-  }
-  const text = String(value || "").replace(/\s+/g, " ").trim();
-  if (text) output.push(text);
-  return output;
-}
-
-function cleanSearchIntentPhrase(value) {
-  return String(value || "")
-    .replace(/^[\s"'\[\]{}()<>]+|[\s"'\[\]{}()<>]+$/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function collectResearchIntentPhrases(researchResult, limit = 8) {
-  const rawParts = flattenSearchIntentParts([
-    researchResult?.coreQuestions,
-    researchResult?.mustCover,
-    researchResult?.uncertainItems,
-    researchResult?.notes,
-    researchResult?.writerBrief,
-    researchResult?.writerContract?.mustAnswer,
-    researchResult?.writerContract?.mustCover,
-    researchResult?.writerContract?.uncertainItems,
-    researchResult?.writerContract?.sourceBoundaries
-  ]);
-  const seen = new Set();
-  const phrases = [];
-  for (const part of rawParts) {
-    const chunks = String(part || "").split(/[,\n\r;|/]+|(?:\s+-\s+)|(?:\.\s+)/);
-    for (const chunk of chunks) {
-      const phrase = cleanSearchIntentPhrase(chunk);
-      if (phrase.length < 2 || phrase.length > 70) continue;
-      const key = phrase.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      phrases.push(phrase);
-      if (phrases.length >= limit) return phrases;
-    }
-  }
-  return phrases;
-}
-
-function buildResearchIntentSearchQueries(researchResult, laneResult = {}, searchTopic = "") {
-  const selectedTopic = cleanSearchIntentPhrase(
-    researchResult?.finalTitle
-    || researchResult?.selectedTitle
-    || researchResult?.topicThesis
-    || searchTopic
-    || ""
-  );
-  const lane = cleanSearchIntentPhrase(
-    laneResult.topicLane
-    || (Array.isArray(laneResult.selectedKeywordPhrases) ? laneResult.selectedKeywordPhrases[0] : "")
-    || ""
-  );
-  const phrases = collectResearchIntentPhrases(researchResult, 6);
-  const candidates = [];
-  for (const phrase of phrases) {
-    if (selectedTopic) candidates.push(`${selectedTopic} ${phrase}`);
-    if (lane && phrase !== lane) candidates.push(`${lane} ${phrase}`);
-  }
-  if (selectedTopic && lane && !selectedTopic.includes(lane)) {
-    candidates.push(`${selectedTopic} ${lane}`);
-  }
-  return uniqueSearchQueries(candidates, 4);
-}
-
-function buildResearchIntentGuidance(researchResult, context = {}) {
-  const phrases = collectResearchIntentPhrases(researchResult, 10);
-  const writerIssue = cleanSearchIntentPhrase(context.writerIssueReason || "");
-  return [
-    writerIssue,
-    ...phrases
-  ].filter(Boolean).join(" ");
-}
-
-function authorityEvidenceText(researchResult, searchTopic = "", sourceQuality = null) {
-  return flattenSearchIntentParts([
-    searchTopic,
-    sourceQuality?.reason,
-    researchResult?.finalTitle,
-    researchResult?.selectedTitle,
-    researchResult?.topicThesis,
-    researchResult?.topicLane,
-    researchResult?.selectedKeywordPhrases,
-    researchResult?.searchQueries,
-    researchResult?.failureReason,
-    researchResult?.searchFlowSummary,
-    researchResult?.writerBrief,
-    researchResult?.coreQuestions,
-    researchResult?.mustCover,
-    researchResult?.uncertainItems,
-    researchResult?.notes,
-    researchResult?.writerContract?.sourceBoundaries,
-    researchResult?.writerContract?.mustAnswer,
-    researchResult?.writerContract?.mustCover,
-    researchResult?.writerContract?.uncertainItems
-  ]).join(" ");
-}
-
-function collectAuthorityEvidenceTerms(researchResult, searchTopic = "", sourceQuality = null, limit = 8) {
-  const text = authorityEvidenceText(researchResult, searchTopic, sourceQuality);
-  const groups = [
-    {
-      pattern: /(신청|접수|모집|채용|지원금|지원\s*대상|지원\s*조건|정책\s*자금|대출|보조금|자격|마감|공고)/i,
-      terms: ["공식 공고", "신청 조건", "대상 자격", "접수 기간"]
-    },
-    {
-      pattern: /(공시|계약|수주|공급계약|IR|investor|투자자|실적|잠정실적|매출|영업이익|배당|자사주)/i,
-      terms: ["공시", "IR", "투자자 자료", "계약 원문"]
-    },
-    {
-      pattern: /(보고서|전망|지표|지수|통계|데이터|등급|신용평가|산업\s*전망|수주잔고|선가|시장\s*자료)/i,
-      terms: ["보고서", "지표", "통계", "원문", "PDF"]
-    },
-    {
-      pattern: /(발표|출시|공개|업데이트|로드맵|제품|모델|기술|launch|release|announcement|unveil)/i,
-      terms: ["공식 발표", "뉴스룸", "자료", "원문"]
-    },
-    {
-      pattern: /(법령|법률|규제|세금|세무|의료|보험|허가|인증)/i,
-      terms: ["법령", "고시", "기관 원문", "PDF"]
-    }
-  ];
-  const terms = [];
-  for (const group of groups) {
-    if (group.pattern.test(text)) {
-      terms.push(...group.terms);
-    }
-  }
-  if (/PDF|원문|공식|기관|자료/i.test(text)) {
-    terms.push("공식 자료", "원문", "PDF");
-  }
-  return uniqueSearchQueries(terms.length ? terms : ["공식 자료", "원문", "보고서", "PDF"], limit);
-}
-
-function collectAuthoritySubjectPhrases(researchResult, searchTopic = "", limit = 5) {
-  const rawParts = flattenSearchIntentParts([
-    researchResult?.finalTitle,
-    researchResult?.selectedTitle,
-    researchResult?.topicLane,
-    researchResult?.selectedKeywordPhrases,
-    researchResult?.searchQueries,
-    searchTopic,
-    researchResult?.topicThesis,
-    researchResult?.coreQuestions,
-    researchResult?.uncertainItems,
-    researchResult?.writerContract?.uncertainItems
-  ]);
-  const seen = new Set();
-  const phrases = [];
-  for (const part of rawParts) {
-    const chunks = String(part || "").split(/[,\n\r;|/?]+|(?:\s+-\s+)|(?:\.\s+)/);
-    for (const chunk of chunks) {
-      let phrase = cleanSearchIntentPhrase(chunk)
-        .replace(/^(최신|정확한|현재|공식|기관|원문|다음|확인|필요|여부)\s+/g, "")
-        .replace(/\s+(무엇인가|무엇인지|어떤가|확인해야 합니다|확인 필요)$/g, "")
-        .trim();
-      if (phrase.length < 3 || phrase.length > 80) continue;
-      if (/^(공식|기관|원문|보고서|자료|PDF|확인|필요)$/i.test(phrase)) continue;
-      const key = phrase.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      phrases.push(phrase);
-      if (phrases.length >= limit) return phrases;
-    }
-  }
-  return phrases;
-}
-
-function needsAuthorityRecheckQueries(researchResult, sourceQuality = null) {
-  if (sourceQuality?.authorityEvidenceRequired === true && Number(sourceQuality?.authorityEvidenceCandidates || 0) === 0) return true;
-  const text = [
-    researchResult?.failureReason,
-    researchResult?.searchFlowSummary,
-    researchResult?.writerBrief,
-    researchResult?.coreQuestions,
-    researchResult?.mustCover,
-    researchResult?.uncertainItems,
-    researchResult?.notes
-  ].flat().filter(Boolean).join(" ");
-  return /(공고|잡알리오|모집\s*기간|신청\s*조건|접수\s*기간|지원\s*조건|지원\s*대상|채용|인턴|지원금|정책\s*자금|대출|보조금|법령|법률|세금|세무|자격|마감)/i.test(text);
-}
-
-function buildAuthorityRecheckQueries(researchResult, searchTopic, sourceQuality = null) {
-  if (!needsAuthorityRecheckQueries(researchResult, sourceQuality)) return [];
-  const subjects = collectAuthoritySubjectPhrases(researchResult, searchTopic, 5);
-  const evidenceTerms = collectAuthorityEvidenceTerms(researchResult, searchTopic, sourceQuality, 8);
-  if (!subjects.length || !evidenceTerms.length) return [];
-  const evidenceBundle = evidenceTerms.slice(0, 4).join(" ");
-  const secondaryBundle = evidenceTerms.slice(2, 6).join(" ") || evidenceBundle;
-  const candidates = [
-    `${subjects[0]} ${evidenceBundle}`,
-    subjects[1] ? `${subjects[1]} ${secondaryBundle}` : "",
-    subjects[2] ? `${subjects[2]} ${evidenceTerms.slice(0, 3).join(" ")}` : ""
-  ];
-  return uniqueSearchQueries(candidates, 3);
 }
 
 function detectCodexSourceFailure(result) {
@@ -756,18 +555,7 @@ function todayLabel() {
 }
 
 async function resolveTopicInput(form, category, log) {
-  const topicMode = String(form.topicMode || "manual");
-  const manualTopic = String(form.topic || "").trim();
-  const manualKeyword = String(form.keyword || "").trim();
-
-  if (topicMode !== "auto") {
-    return {
-      topic: manualTopic,
-      keyword: manualKeyword
-    };
-  }
-
-  const seedKeyword = manualKeyword || category;
+  const seedKeyword = String(form.keyword || "").trim() || category;
   log("자동 주제 모드: 카테고리와 키워드를 Research/Title Agent에 전달합니다.");
   return {
     topic: "",
@@ -794,110 +582,34 @@ function createSessionExpiredError(reason = "네이버 세션이 만료되어 �
   return error;
 }
 
-async function verifyPublishSessionBeforeGeneration({ runtimeRoot, account, blogId, form, settings, jobId }) {
-  const browserProfileDir = getAccountProfileDir(runtimeRoot, account);
-  const sessionKey = sessionKeyFor(account, browserProfileDir);
-  updateStatus(jobId, "publishing", "Naver 글쓰기 편집기 확인");
-  safeLog(jobId, "본문 생성 전 Naver 계정 로그인 세션과 블로그 글쓰기 편집기 화면을 먼저 확인합니다.");
-  safeLog(jobId, `계정 profile: ${browserProfileDir}`);
-  const cached = reusableNaverSession(sessionKey);
-  if (cached) {
-    safeLog(jobId, "이미 확인된 글쓰기 편집기 브라우저 세션을 재사용합니다.");
-    return cached;
-  }
-
-  let result;
-  try {
-    result = await checkNaverSession({
-      blogId,
-      browserProfileDir,
-      interactiveLogin: true,
-      keepOpen: true,
-      requireEditor: true,
-      domNotes: form.naverEditorDomNotes || "",
-      runtimeRoot,
-      log: (message, level) => safeLog(jobId, message, level)
-    });
-  } catch (error) {
-    if (error.code === "SESSION_EXPIRED" && account.id) {
-      updateAccountSession(runtimeRoot, account.id, "expired", settings);
-      emitAccountStore(runtimeRoot);
-    }
-    throw error;
-  }
-  if (result.status !== "valid" || !result.preparedSession) {
-    throw createSessionExpiredError("Naver 로그인 세션을 확인하지 못했습니다. 먼저 계정관리에서 세션확인을 완료해 주세요.");
-  }
-
-  if (account.id) {
-    updateAccountSession(runtimeRoot, account.id, "valid", settings);
-    emitAccountStore(runtimeRoot);
-  }
-  const prepared = result.preparedSession;
-  activeNaverSessions.set(sessionKey, prepared);
-  safeLog(jobId, "Naver 글쓰기 편집기 준비 결과를 앱에 저장했습니다.");
-  safeLog(jobId, "Naver 글쓰기 편집기 확인 완료. Research/Title Agent를 시작합니다.");
-  return prepared;
+async function verifyPublishSessionBeforeGeneration({ account, blogId, jobId }) {
+  updateStatus(jobId,'publishing','연결된 Chrome의 글쓰기 권한 확인');
+  const connection = getBridge().snapshot(account.id);
+  safeLog(jobId, connection.status === 'waiting_login'
+    ? '이 계정의 Chrome에서 로그인을 기다리고 있습니다. 로그인 확인이 완료되면 자동으로 이어갑니다. 대기를 끝내려면 계정 카드의 대기 취소를 누르세요.'
+    : connection.busy ? '진행 중인 계정 로그인 확인 결과를 기다립니다.' : '계정 로그인과 블로그 글쓰기 권한을 확인합니다.');
+  const result=await checkNaverSession({accountId:account.id,blogId,interactiveLogin:false,preflightTitle:true});
+  if(result.status!=='valid') throw Object.assign(new Error(result.reason || '계정 연결 상태를 확인해 주세요.'), {code:'SESSION_EXPIRED'});
+  return result.preparedSession;
 }
 
-async function verifyTistorySessionBeforeGeneration({ runtimeRoot, form, settings, jobId }) {
-  const tistoryBlogId = String(form.tistoryBlogId || settings.tistoryBlogId || "").trim();
-  const browserProfileDir = getTistoryProfileDir(runtimeRoot, tistoryBlogId);
-  const key = tistorySessionKey(tistoryBlogId, browserProfileDir);
-  updateStatus(jobId, "publishing", "티스토리 편집기 세션 확인");
-  safeLog(jobId, `티스토리 프로필: ${browserProfileDir}`);
-  try {
-    const existingSession = reusableTistorySession(key);
-    if (existingSession) {
-      writeSettings(runtimeRoot, {
-        tistorySessionStatus: "valid",
-        tistorySessionCheckedAt: new Date().toISOString()
-      });
-      safeLog(jobId, "열려 있는 티스토리 편집기 세션을 재사용합니다.");
-      return {
-        status: "valid",
-        reason: "reused_open_tistory_editor",
-        url: existingSession.page?.url?.() || "",
-        browserProfileDir,
-        preparedSession: existingSession,
-        page: existingSession.page
-      };
+async function verifyTistorySessionBeforeGeneration({form, jobId}) {
+  safeLog(jobId, '티스토리 로그인과 대상 블로그 쓰기 권한을 확인합니다.');
+  const result=await checkTistorySession({tistoryBlogId:form.tistoryBlogId,category:form.category,interactiveLogin:true});
+  if(result.status!=='valid')throw new Error(result.reason || '티스토리 공용 Chrome을 연결해 주세요. 원고 생성은 시작하지 않았습니다.');
+  return result;
+}
+
+async function publishSavedDraft(runtimeRoot, draft, jobId) {
+  return publishSequence(draft, {
+    save: value=>writeSettings(runtimeRoot,{pendingNaverPublishDraft:value}),
+    log: message=>safeLog(jobId,message),
+    naver: value=>publishToNaver({...value,log:message=>safeLog(jobId,message)}),
+    tistory: value=>{
+      updateStatus(jobId,'publishing','네이버 발행 완료 · 티스토리 이어 발행');
+      return publishToTistory({...value,log:message=>safeLog(jobId,message)});
     }
-    const result = await checkTistorySession({
-      tistoryBlogId,
-      browserProfileDir,
-      runtimeRoot,
-      failOnLoginRequired: true,
-      keepOpen: true,
-      log: (message, level) => safeLog(jobId, message, level)
-    });
-    if (result.preparedSession) {
-      activeTistorySessions.set(key, result.preparedSession);
-    }
-    writeSettings(runtimeRoot, {
-      tistorySessionStatus: result.status === "valid" ? "valid" : "unknown",
-      tistorySessionCheckedAt: new Date().toISOString()
-    });
-    if (result.status !== "valid") {
-      safeLog(jobId, "티스토리 세션이 유효하지 않습니다. 네이버 발행은 계속 진행하고 티스토리 발행은 건너뜁니다.", "warn");
-      return {
-        status: "expired",
-        reason: "티스토리 발행 전에 카카오 로그인이 필요합니다."
-      };
-    }
-    safeLog(jobId, "티스토리 편집기 세션 확인 완료.");
-    return result;
-  } catch (error) {
-    writeSettings(runtimeRoot, {
-      tistorySessionStatus: "expired",
-      tistorySessionCheckedAt: new Date().toISOString()
-    });
-    safeLog(jobId, `티스토리 세션 확인에 실패했습니다. 네이버 발행은 계속 진행하고 티스토리 발행은 건너뜁니다: ${error.message}`, "warn");
-    return {
-      status: "expired",
-      reason: error.message
-    };
-  }
+  });
 }
 
 async function startTistoryTestPublish(form = {}) {
@@ -959,7 +671,7 @@ async function startTistoryTestPublish(form = {}) {
       article,
       titleImagePath: "",
       bodyImages: [{ sequence: 1, path: imagePath }],
-      breakSentencesInBody: form.breakSentencesInBody !== false,
+      breakSentencesInBody: true,
       tags: ["티스토리테스트", "자동화테스트"],
       browserProfileDir,
       preparedContext: preparedTistorySession?.context,
@@ -1000,7 +712,17 @@ async function startTistoryTestPublish(form = {}) {
   }
 }
 
+let modelRetryPending = null;
+function awaitModelRetry(jobId, payload) {
+  return new Promise(resolve=>{
+    const id = `${jobId}-${Date.now()}`;
+    modelRetryPending={id,resolve};
+    emit('job:modelError',{...payload,id});
+  });
+}
+
 async function startJob(form) {
+  form = {...form, topicMode:"auto", topic:"", publishAfterGenerate:true};
   if (activeJob) {
     throw new Error("이미 실행 중인 작업이 있습니다.");
   }
@@ -1017,7 +739,6 @@ async function startJob(form) {
   const accountStore = readAccountStore(runtimeRoot, settings);
   const account = resolveAccount(form, accountStore);
   const category = String(form.category || "").trim();
-  const categoryKeyword = String(form.keyword || "").trim();
   const blogId = String(form.blogId || account.blogId || account.naverId || "").trim();
   const codexCmdPath = resolveCodexCmdPath(form.codexCmdPath || settings.codexCmdPath);
   const codexModel = normalizeCodexModel(form.codexModel || settings.codexModel);
@@ -1025,16 +746,38 @@ async function startJob(form) {
   const publishPrivate = publishVisibility !== "public";
   const publishScheduleMode = String(form.publishScheduleMode || "now");
   const reserveAfterHours = Number(form.reserveAfterHours || 0);
+  const resumeOptions=settings.pendingGenerationDraft?.checkpoint?.generationOptions;
+  if(resumeOptions)form={...form,...resumeOptions,codexModel:form.codexModel,agentModels:form.agentModels};
+  const categoryKeyword = String(form.keyword || "").trim();
   const includeTitleImage = form.includeTitleImage !== false;
   const titleImageAspectRatio = normalizeImageAspectRatio(form.titleImageAspectRatio || settings.titleImageAspectRatio || form.imageAspectRatio || settings.imageAspectRatio);
   const bodyImageAspectRatio = normalizeImageAspectRatio(form.bodyImageAspectRatio || settings.bodyImageAspectRatio || form.imageAspectRatio || settings.imageAspectRatio);
   const maxBodyImages = normalizeMaxBodyImages(form.maxBodyImages);
-  const breakSentencesInBody = form.breakSentencesInBody !== false;
+  const breakSentencesInBody = true;
   const agentModels = form.agentModels || settings.agentModels || {};
   const shouldPublish = form.publishAfterGenerate === true || form.topicMode === "auto";
-  const publishToTistoryAfterNaver = shouldPublish && form.publishToTistoryAfterNaver === true;
+  const pendingRecovery=settings.pendingNaverPublishDraft;
+  const generationDraft=settings.pendingGenerationDraft;
+  const pendingTarget=pendingRecovery || generationDraft;
+  if(pendingTarget && (pendingTarget.accountId!==account.id || pendingTarget.blogId!==blogId || pendingTarget.category!==category)){
+    activeJob=null;
+    throw new Error('중단된 작업의 계정·블로그·카테고리가 현재 대상과 다릅니다. 기존 대상을 선택하거나 기존 작업 취소 버튼을 눌러 취소하세요.');
+  }
+  if(shouldPublish && pendingRecovery?.accountId===account.id && pendingRecovery.blogId===blogId && (pendingRecovery.status==='publish_uncertain' || ['running','uncertain'].includes(pendingRecovery.publications?.naver?.status) || ['running','uncertain'].includes(pendingRecovery.publications?.tistory?.status))) {
+    try {
+      if(pendingRecovery.category!==category)throw Object.assign(new Error('발행 결과 확인이 필요한 이전 원고의 카테고리를 선택하세요. 새 원고 생성은 중지했습니다.'),{code:'PUBLISH_UNCERTAIN'});
+      settings.pendingNaverPublishDraft=await require('./lib/publishRecovery').recoverPendingPublication(pendingRecovery,{
+        bridge:getBridge(),save:value=>writeSettings(runtimeRoot,{pendingNaverPublishDraft:value}),log:message=>safeLog(jobId,message)
+      });
+    } catch(error){activeJob=null;throw error;}
+  }
+  const resumeDraft=shouldPublish && pendingDraftMatches(settings.pendingNaverPublishDraft,{account,blogId,category}) ? settings.pendingNaverPublishDraft : null;
+  const tistoryBlogId = resumeDraft ? (resumeDraft.publishToTistoryAfterNaver!==false ? resumeDraft.tistoryBlogId || '' : '') : account.tistoryBlogId || "";
+  const publishToTistoryAfterNaver = shouldPublish && Boolean(tistoryBlogId);
   let tistoryPublishReady = publishToTistoryAfterNaver;
-  const tistoryBlogId = String(form.tistoryBlogId || settings.tistoryBlogId || "").trim();
+  if(publishToTistoryAfterNaver && publishScheduleMode==='reserve' && publishVisibility!=='public'){
+    activeJob=null;throw new Error('티스토리는 비공개 예약을 제공하지 않습니다. 공개 예약 또는 현재 비공개 저장으로 변경해 주세요. 원고 생성은 시작하지 않았습니다.');
+  }
   if (!category) {
     activeJob = null;
     throw new Error("카테고리는 필수입니다.");
@@ -1054,6 +797,10 @@ async function startJob(form) {
   if (shouldPublish) {
     safeLog(jobId, `Naver 블로그 주소 ID: ${blogId} (로그인은 열린 Chrome에서 직접 입력)`);
   }
+  // Preserve the queue position before connection/login preflight can fail.
+  if(!pendingRecovery && !generationDraft){
+    writeSettings(runtimeRoot,{pendingGenerationDraft:{accountId:account.id,blogId,category,jobId,status:'generation_pending',checkpoint:null}});
+  }
 
   let preparedNaverSession = null;
   let preparedTistorySession = null;
@@ -1062,7 +809,7 @@ async function startJob(form) {
   let latestTagsForResume = [];
   try {
     if (shouldPublish) {
-      preparedNaverSession = await verifyPublishSessionBeforeGeneration({
+      preparedNaverSession = resumeDraft?.publications?.naver?.status==='done' ? {} : await verifyPublishSessionBeforeGeneration({
         runtimeRoot,
         account,
         blogId,
@@ -1071,10 +818,10 @@ async function startJob(form) {
         jobId
       });
       browserProfileDir = preparedNaverSession.browserProfileDir || browserProfileDir;
-      if (tistoryPublishReady) {
+      if (tistoryPublishReady && resumeDraft?.publications?.tistory?.status!=='done') {
         const tistorySession = await verifyTistorySessionBeforeGeneration({
           runtimeRoot,
-          form,
+          form: {...form,tistoryBlogId},
           settings,
           jobId
         });
@@ -1119,7 +866,9 @@ async function startJob(form) {
   let keyword = "";
   try {
     safeLog(jobId, "주제 입력값 준비 시작");
-    resolved = await resolveTopicInput(form, category, (message, level) => safeLog(jobId, message, level, "research"));
+    resolved = resumeDraft
+      ? {topic:resumeDraft.topic || resumeDraft.title,keyword:resumeDraft.keyword || categoryKeyword}
+      : await resolveTopicInput(form, category, (message, level) => safeLog(jobId, message, level, "research"));
     topic = resolved.topic;
     keyword = resolved.keyword;
     safeLog(jobId, "주제 입력값 준비 완료");
@@ -1128,10 +877,6 @@ async function startJob(form) {
     throw error;
   }
 
-  if (!topic && String(form.topicMode || "manual") !== "auto") {
-    activeJob = null;
-    throw new Error("주제는 필수입니다.");
-  }
 
   const jobDir = path.join(runtimeRoot, "jobs", jobId);
   fs.mkdirSync(jobDir, { recursive: true });
@@ -1164,8 +909,9 @@ async function startJob(form) {
     naverEditorDomNotes: form.naverEditorDomNotes || "",
     publishAfterGenerate: shouldPublish,
     publishPrivate,
-    topicMode: form.topicMode || "manual",
+    topicMode: "auto",
     repeatTermMinutes: Number(form.repeatTermMinutes || 60),
+    crossPublish: form.crossPublish === true,
     publishVisibility,
     publishScheduleMode,
     reserveAfterHours,
@@ -1184,7 +930,13 @@ async function startJob(form) {
   let keywordLanePlan = buildKeywordLanePlan(keyword, [], { blogId, category, excludedKeywordLanes });
   let latestLaneResult = normalizeResearchLaneResult({}, keywordLanePlan);
   let latestResearchTitleResult = null;
+  let lastLoggedTitle="",lastLoggedLane="";
+  let generationAttempts=[];
   const pendingDraft = settings.pendingNaverPublishDraft;
+  if(shouldPublish && pendingDraft?.status==='publish_uncertain' && pendingDraft.accountId===account.id && pendingDraft.blogId===blogId){
+    activeJob=null;
+    throw new Error('이전 발행 결과가 불확실하여 재생성·자동 재발행을 중지했습니다. 네이버 게시글·예약 목록을 확인한 뒤, 이 원고를 다시 사용하지 않으려면 본문 오른쪽 상단의 ‘기존 작업 취소’ 버튼을 눌러 해제하세요.');
+  }
   if (shouldPublish && pendingDraftMatches(pendingDraft, { account, blogId, category })) {
     const resumeAgentResult = {
       title: pendingDraft.title || "",
@@ -1208,72 +960,8 @@ async function startJob(form) {
     try {
       updateStatus(jobId, "publishing", "Naver pending draft publish resume");
       safeLog(jobId, "이전 작업의 작성 완료 draft를 재사용해 발행만 이어갑니다.", "info");
-      await publishToNaver({
-        blogId,
-        category,
-        publishPrivate: pendingDraft.publishPrivate ?? publishPrivate,
-        publishVisibility: pendingDraft.publishVisibility || publishVisibility,
-        publishScheduleMode: pendingDraft.publishScheduleMode || publishScheduleMode,
-        reserveAfterHours: Number(pendingDraft.reserveAfterHours ?? reserveAfterHours),
-        failOnLoginRequired: form.failOnLoginRequired === true,
-        title: resumeAgentResult.title,
-        article: resumeAgentResult.article,
-        titleImagePath: resumeAgentResult.titleImagePath,
-        bodyImages: resumeAgentResult.bodyImages,
-        breakSentencesInBody: pendingDraft.breakSentencesInBody !== false,
-        tags: resumeTags,
-        domNotes: form.naverEditorDomNotes || "",
-        browserProfileDir,
-        preparedContext: preparedNaverSession?.context,
-        preparedPage: preparedNaverSession?.page,
-        resumeExistingDraft: true,
-        log: (message, level) => safeLog(jobId, message, level)
-      });
-      if (account.id) {
-        updateAccountSession(runtimeRoot, account.id, "valid", settings);
-        emitAccountStore(runtimeRoot);
-      }
-      let publishReason = "네이버 보류 발행 초안 발행 완료.";
-      if (pendingDraft.publishToTistoryAfterNaver && tistoryPublishReady) {
-        try {
-          updateStatus(jobId, "publishing", "네이버 이어하기 발행 후 티스토리 발행");
-          const tistoryProfileDir = getTistoryProfileDir(runtimeRoot, tistoryBlogId);
-          const tistoryKey = tistorySessionKey(tistoryBlogId, tistoryProfileDir);
-          preparedTistorySession = reusableTistorySession(tistoryKey);
-          await publishToTistory({
-            tistoryBlogId,
-            category,
-            publishPrivate: pendingDraft.publishPrivate ?? publishPrivate,
-            publishVisibility: pendingDraft.publishVisibility || publishVisibility,
-            publishScheduleMode: pendingDraft.publishScheduleMode || publishScheduleMode,
-            reserveAfterHours: Number(pendingDraft.reserveAfterHours ?? reserveAfterHours),
-            failOnLoginRequired: form.failOnLoginRequired === true,
-            title: resumeAgentResult.title,
-            article: resumeAgentResult.article,
-            titleImagePath: resumeAgentResult.titleImagePath,
-            bodyImages: resumeAgentResult.bodyImages,
-            breakSentencesInBody: pendingDraft.breakSentencesInBody !== false,
-            tags: resumeTags,
-            browserProfileDir: tistoryProfileDir,
-            preparedContext: preparedTistorySession?.context,
-            preparedPage: preparedTistorySession?.page,
-            runtimeRoot,
-            log: (message, level) => safeLog(jobId, message, level)
-          });
-          writeSettings(runtimeRoot, {
-            tistorySessionStatus: "valid",
-            tistorySessionCheckedAt: new Date().toISOString()
-          });
-          publishReason = "네이버 보류 발행 초안과 티스토리 발행 완료.";
-        } catch (error) {
-          publishReason = `네이버 보류 발행 초안은 완료됐지만 티스토리 발행에 실패했습니다: ${error.message}`;
-          writeSettings(runtimeRoot, {
-            tistorySessionStatus: error.code === "TISTORY_SESSION_EXPIRED" ? "expired" : "unknown",
-            tistorySessionCheckedAt: new Date().toISOString()
-          });
-          safeLog(jobId, publishReason, "warn");
-        }
-      }
+      await publishSavedDraft(runtimeRoot,pendingDraft,jobId);
+      const publishReason=pendingDraft.tistoryBlogId ? '네이버와 티스토리 발행 완료.' : '네이버 발행 완료.';
       clearPendingNaverPublishDraft(runtimeRoot);
       const embedding = createEmbedding(resumeAgentResult.title);
       appendHistory(runtimeRoot, {
@@ -1312,15 +1000,16 @@ async function startJob(form) {
       });
       return { status: "success", resumedPendingPublish: true };
     } catch (error) {
+      if(error.code==='PUBLISH_UNCERTAIN')writeSettings(runtimeRoot,{pendingNaverPublishDraft:{...readSettings(runtimeRoot).pendingNaverPublishDraft,status:'publish_uncertain'}});
       if (error.code === "SESSION_EXPIRED" && account.id) {
         updateAccountSession(runtimeRoot, account.id, "expired", settings);
         emitAccountStore(runtimeRoot);
       }
       safeLog(jobId, error.message, "error");
-      updateStatus(jobId, error.code === "SESSION_EXPIRED" ? "session_expired" : "failed", error.message);
+      updateStatus(jobId, error.code === "SESSION_EXPIRED" ? "session_expired" : error.code === "PUBLISH_UNCERTAIN" ? "publish_uncertain" : "failed", error.message);
       emit("job:complete", {
         ...nonSensitiveJob,
-        status: error.code === "SESSION_EXPIRED" ? "session_expired" : "failed",
+        status: error.code === "SESSION_EXPIRED" ? "session_expired" : error.code === "PUBLISH_UNCERTAIN" ? "publish_uncertain" : "failed",
         title: resumeAgentResult.title,
         article: resumeAgentResult.article,
         images: getPreviewImages(resumeAgentResult),
@@ -1329,7 +1018,7 @@ async function startJob(form) {
         history: readHistory(runtimeRoot)
       });
       return {
-        status: error.code === "SESSION_EXPIRED" ? "session_expired" : "failed",
+        status: error.code === "SESSION_EXPIRED" ? "session_expired" : error.code === "PUBLISH_UNCERTAIN" ? "publish_uncertain" : "failed",
         reason: error.message,
         resumedPendingPublish: true
       };
@@ -1344,7 +1033,7 @@ async function startJob(form) {
     keywordLanePlan = buildKeywordLanePlan(keyword, history, { blogId, category, excludedKeywordLanes });
     latestLaneResult = normalizeResearchLaneResult({}, keywordLanePlan);
     const titleHistory = accountHistory
-      .filter((entry) => Array.isArray(entry.embedding))
+      .filter((entry) => entry.title && ["success","generated"].includes(entry.status))
       .map((entry) => ({ title: entry.title, embedding: entry.embedding }));
 
     const usesImages = includeTitleImage || maxBodyImages > 0;
@@ -1358,16 +1047,24 @@ async function startJob(form) {
     };
     safeLog(jobId, `Agent 모델 설정: Codex ${modelSnapshot.codexModel}, Main ${modelSnapshot.main}, Research/Title ${modelSnapshot.research}, Writer ${modelSnapshot.writer}, Image Worker ${modelSnapshot.image}`);
     safeLog(jobId, `Codex ${usesImages ? "본문/이미지 프롬프트" : "본문"} 생성 시작: ${generationSubject}`);
+    if(generationDraft?.checkpoint)safeLog(jobId,'중단된 작업을 이어갑니다. 완료된 조사·본문·검증·이미지는 재사용하고 미완료 단계부터 다시 시도합니다.');
     const generationStartedAt = Date.now();
     let generationPhase = "준비 중";
     const generationHeartbeat = setInterval(() => {
       const minutes = Math.max(1, Math.ceil((Date.now() - generationStartedAt) / 60000));
-      safeLog(jobId, `현재 작업 중입니다 - 경과 ${minutes}분`);
+
       updateStatus(jobId, "generating", `${generationPhase} (${minutes}분 경과)`);
     }, 60000);
+    const retrievalContext=createRetrievalContext();
     let codexResult;
     try {
       codexResult = await runCodexGeneration({
+        generationCheckpoint: generationDraft?.checkpoint || null,
+        onGenerationCheckpoint: checkpoint => {
+          writeSettings(runtimeRoot,{pendingGenerationDraft:{accountId:account.id,blogId,category,jobId,status:'generation_pending',checkpoint}});
+          fs.writeFileSync(path.join(jobDir,'generation-checkpoint.json'),JSON.stringify(checkpoint,null,2));
+        },
+        onModelError: payload=>awaitModelRetry(jobId,payload),
         codexCmdPath,
         runtimeRoot,
         jobDir,
@@ -1375,7 +1072,7 @@ async function startJob(form) {
         topic,
         keyword,
         category,
-        topicMode: form.topicMode || "manual",
+        topicMode: "auto",
         searchResults: [],
         currentDateLabel,
         includeTitleImage,
@@ -1397,21 +1094,24 @@ async function startJob(form) {
           accountId: account.id || "",
           sampleImagePath: account.sampleImagePath || "",
           sampleImageHash: account.sampleImageHash || "",
+          sampleImageUpdatedAt: account.sampleImageUpdatedAt || "",
           imageStylePrompt: account.imageStylePrompt || "",
           imageStylePromptStatus: account.imageStylePromptStatus || "missing",
           imageStylePromptSourceImageHash: account.imageStylePromptSourceImageHash || ""
         },
-        onAccountImageStylePrompt: (styleResult) => {
+        getAccountImageStyle: () => readAccountStore(runtimeRoot,readSettings(runtimeRoot)).accounts.find(item=>item.id===account.id) || {},
+        onAccountImageStylePrompt: (styleResult, source) => {
           const store = readAccountStore(runtimeRoot, readSettings(runtimeRoot));
           const target = store.accounts.find((item) => item.id === account.id);
-          if (!target) return;
-          target.imageStylePrompt = String(styleResult.imageStylePrompt || "");
-          target.imageStylePromptUpdatedAt = new Date().toISOString();
-          target.imageStylePromptStatus = styleResult.status === "success" ? "ready" : "failed";
-          target.imageStylePromptSourceImageHash = String(styleResult.sampleImageHash || target.sampleImageHash || "");
-          target.imageStylePromptError = String(styleResult.failureReason || "");
+          if (!saveStyleResult(target,source,styleResult)) return;
           const saved = writeAccountStore(runtimeRoot, store, readSettings(runtimeRoot));
           emit("accounts:update", withAccountImageUrls(runtimeRoot, saved));
+        },
+        onArticleReady: (draft) => {
+          // Preview only: unreviewed text is never a resumable publish draft.
+          emit("job:preview", {jobId,title:draft.title,article:draft.article,
+            previewStage:draft.previewStage,writerAttempt:draft.writerAttempt,
+            images:[],imageNotes:[],tags:draft.tags || []});
         },
         onResearchTitle: (researchResult) => {
           latestResearchTitleResult = researchResult || null;
@@ -1426,26 +1126,18 @@ async function startJob(form) {
             searchNeed: researchResult.searchNeed || "",
             at: new Date().toISOString()
           });
-          if (selectedTitle) {
+          if (selectedTitle && selectedTitle!==lastLoggedTitle) {
+            lastLoggedTitle=selectedTitle;
             safeLog(jobId, `선정 제목: ${selectedTitle}`, "info", "main");
           }
-          if (latestLaneResult.topicLane) {
+          if (latestLaneResult.topicLane && latestLaneResult.topicLane!==lastLoggedLane) {
+            lastLoggedLane=latestLaneResult.topicLane;
             safeLog(jobId, `선택 키워드 lane: ${latestLaneResult.topicLane}`, "info", "research");
           }
         },
-        onFinalTitleCandidate: (selectedTitle) => {
-          const titleEmbedding = createEmbedding(selectedTitle);
-          let similarity = 0;
-          for (const item of titleHistory) {
-            similarity = Math.max(similarity, cosineSimilarity(titleEmbedding, item.embedding));
-          }
-          return {
-            duplicate: similarity >= 0.75,
-            similarity,
-            reason: similarity >= 0.75
-              ? `기존 제목과 cosine similarity ${similarity.toFixed(3)}`
-              : ""
-          };
+        onFinalTitleCandidate: (title) => {
+          const key = value => String(value || '').normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
+          return { duplicate: titleHistory.some(item => key(item.title) === key(title)), reason: '동일한 제목이 이미 있습니다.' };
         },
         onTokenUsage: (usage) => {
           jobTokenUsage.total = Number(usage.total || 0);
@@ -1482,12 +1174,12 @@ async function startJob(form) {
             topic,
             category,
             keyword,
-            topicMode: form.topicMode || "manual"
+            topicMode: "auto"
           });
           const laneResult = normalizeResearchLaneResult(researchResult, keywordLanePlan);
           const searchKeyword = laneResult.selectedKeywordPhrases.join(", ") || laneResult.topicLane || category;
-          const authorityQueries = buildAuthorityRecheckQueries(researchResult, searchTopic, searchContext.sourceQuality);
-          const intentQueries = buildResearchIntentSearchQueries(researchResult, laneResult, searchTopic);
+          const authorityQueries = [];
+          const intentQueries = [];
           const searchQueries = uniqueSearchQueries([...authorityQueries, ...laneResult.searchQueries, ...intentQueries], 4);
           laneResult.searchQueries = searchQueries;
           latestLaneResult = laneResult;
@@ -1498,7 +1190,7 @@ async function startJob(form) {
             safeLog(jobId, `Writer Agent 근거 부족 사유로 보강 검색합니다: ${searchContext.writerIssueReason}`, "warn", "research");
           }
           safeLog(jobId, `Research/Title Agent 요청으로 검색 후보 수집 시작: ${researchResult.searchNeed || "normal"}`, "info", "research");
-          const researchIntentGuidance = buildResearchIntentGuidance(researchResult, searchContext);
+          const researchIntentGuidance = String(researchResult.topicThesis || '');
           const researchGuidance = [
             researchIntentGuidance,
             researchResult.searchFlowSummary,
@@ -1508,15 +1200,17 @@ async function startJob(form) {
             ...(Array.isArray(researchResult.mustCover) ? researchResult.mustCover : []),
             ...(Array.isArray(researchResult.uncertainItems) ? researchResult.uncertainItems : [])
           ].filter(Boolean).join(" ");
-          const searchResults = await collectSearchResults({
+          const searchResults = await retrieveResearch({
             topic: searchTopic,
             keyword: searchKeyword,
             category,
             publishPurpose: form.publishPurpose || "",
             researchGuidance,
+            verificationQueries: researchResult.verificationQueries || [],
+            evidenceRequests: researchResult.evidenceRequests || [],
             searchQueries: laneResult.searchQueries,
             searchNeed: researchResult.searchNeed || "",
-            topicMode: form.topicMode || "manual",
+            topicMode: "auto",
             primaryProvider: form.primarySearchProvider || "naver",
             fallbackProvider: form.fallbackSearchProvider || "google",
             naverSearchUrl: form.naverSearchUrl,
@@ -1525,10 +1219,11 @@ async function startJob(form) {
             trustBlogAsSource: form.trustBlogAsSource === true,
             freshnessLevel: form.freshnessLevel || "auto",
             currentDate: currentDateLabel
-          }, (message, level) => safeLog(jobId, message, level, "research"));
-          const mergedSearchResults = mergeSearchResults(searchContext.previousSearchResults, searchResults);
+          }, (message, level) => safeLog(jobId, message, level, "research"),{context:retrievalContext});
+          fs.writeFileSync(path.join(jobDir,"retrieval-audit.json"),JSON.stringify({searchRequests:retrievalContext.searchRequests,documentRequests:retrievalContext.documentRequests,events:retrievalContext.events},null,2));
+          const mergedSearchResults = mergeSearchResults(searchResults, searchContext.previousSearchResults);
           safeLog(jobId, `검색 후보 수집 완료: ${searchResults.length}개, 누적 ${mergedSearchResults.length}개`, "info", "research");
-          const sourceQuality = summarizeSourceQuality(mergedSearchResults, form.topicMode || "manual", {
+          const sourceQuality = summarizeSourceQuality(mergedSearchResults, "auto", {
             topic: searchTopic,
             keyword: searchKeyword,
             category,
@@ -1545,7 +1240,7 @@ async function startJob(form) {
           return { searchResults: mergedSearchResults, sourceQuality };
         }
       }, (message, level, agent = "main") => {
-        const phaseMatch = String(message || "").match(/^Codex 단계:\s*(.+)$/);
+        const phaseMatch = String(message || "").match(/^(?:Codex 단계:\s*|(?=전체 시도 \d+\/\d+))(.+)$/);
         if (phaseMatch) {
           generationPhase = phaseMatch[1];
           updateStatus(jobId, "generating", `Codex ${generationPhase}`);
@@ -1555,6 +1250,7 @@ async function startJob(form) {
     } finally {
       clearInterval(generationHeartbeat);
     }
+    generationAttempts=codexResult.attempts || [];
     if (codexResult.tokenUsage?.total) {
       jobTokenUsage.total = Number(codexResult.tokenUsage.total || 0);
       jobTokenUsage.grossTotal = Number(codexResult.tokenUsage.grossTotal || 0);
@@ -1572,6 +1268,7 @@ async function startJob(form) {
     }
     persistCodexRateLimits(runtimeRoot, jobTokenUsage.rateLimits);
     if (String(codexResult.status || "").toLowerCase() === "duplicate_retry") {
+      writeSettings(runtimeRoot,{pendingGenerationDraft:null});
       const duplicateTitle = String(codexResult.title || codexResult.researchTitleResult?.finalTitle || "").trim();
       const duplicateEmbedding = createEmbedding(duplicateTitle);
       const duplicateSimilarity = Number(codexResult.duplicateSimilarity || 0);
@@ -1616,12 +1313,14 @@ async function startJob(form) {
       });
       return { status: "duplicate_retry", keywordLane: keywordLaneResultPayload(latestLaneResult) };
     }
-    const sourceFailureReason = detectCodexSourceFailure(codexResult);
+    if(codexResult.article)latestAgentResultForResume={title:codexResult.title || codexResult.researchTitleResult?.finalTitle || '',article:codexResult.article,tags:codexResult.tags || [],bodyImages:[],titleImagePath:''};
+    const sourceFailureReason = codexResult.status==='failed' ? (codexResult.failureReason || '생성을 완료하지 못했습니다.') : '';
     if (sourceFailureReason) {
       latestResearchTitleResult = codexResult.researchTitleResult || latestResearchTitleResult;
       latestLaneResult = normalizeResearchLaneResult(latestResearchTitleResult, keywordLanePlan);
       const sourceError = new Error(sourceFailureReason);
       sourceError.failurePhase = codexResult.failurePhase || (codexResult.researchTitleResult ? "research" : "");
+      sourceError.failureKind = codexResult.failureKind || 'execution';
       throw sourceError;
     }
     const researchTitleResult = codexResult.researchTitleResult || {};
@@ -1637,6 +1336,9 @@ async function startJob(form) {
       result: codexResult
     });
     latestAgentResultForResume = agentResult;
+    if(codexResult.publishable===false || agentResult.imageWarnings?.length){
+      throw Object.assign(new Error([...(codexResult.notes || []),...(agentResult.imageWarnings || [])].join(' / ') || '이미지 생성을 완료하지 못했습니다. 본문을 보존하고 자동 진행을 중지합니다.'),{failureKind:'execution',failurePhase:'image'});
+    }
     for (const note of agentResult.imageWarnings || []) {
       const imageNoteLevel = /실패|없|못|권한|거부|찾을 수 없|Access|EPERM|denied/i.test(String(note || ""))
         ? "warn"
@@ -1645,54 +1347,6 @@ async function startJob(form) {
     }
 
     const embedding = createEmbedding(agentResult.title);
-    let maxSimilarity = 0;
-    for (const item of titleHistory) {
-      maxSimilarity = Math.max(maxSimilarity, cosineSimilarity(embedding, item.embedding));
-    }
-
-    if (maxSimilarity >= 0.75) {
-      const duplicateEntry = {
-        id: jobId,
-        create_at: new Date().toISOString(),
-        account_id: account.id || "",
-        blog_id: blogId,
-        title: agentResult.title,
-        topic,
-        keyword,
-        category,
-        ...keywordLaneHistoryFields(latestLaneResult),
-        status: "duplicate_retry",
-        harness_version: "lean-agent-v1",
-        final_verdict: "REVISION",
-        failure_phase: "main_review",
-        research_title: researchTitleResult.finalTitle || researchTitleResult.selectedTitle || "",
-        embedding_model: "local-hash-v1",
-        embedding,
-        token_total: jobTokenUsage.total,
-        token_gross_total: jobTokenUsage.grossTotal,
-        token_input: jobTokenUsage.inputTokens,
-        token_cached_input: jobTokenUsage.cachedInputTokens,
-        token_output: jobTokenUsage.outputTokens,
-        prompt_characters: jobTokenUsage.promptCharacters,
-        token_agents: jobTokenUsage.agents,
-        reason: `기존 제목과 cosine similarity ${maxSimilarity.toFixed(3)}`
-      };
-      appendHistory(runtimeRoot, duplicateEntry);
-      safeLog(jobId, duplicateEntry.reason, "warn");
-      updateStatus(jobId, "duplicate_retry", "유사 제목으로 중단");
-      emit("job:complete", {
-        ...nonSensitiveJob,
-        status: "duplicate_retry",
-        title: agentResult.title,
-        article: agentResult.article,
-        images: getPreviewImages(agentResult),
-        imageNotes: agentResult.imageWarnings || [],
-        tokenUsage: jobTokenUsage,
-        history: readHistory(runtimeRoot)
-      });
-      return { status: "duplicate_retry", keywordLane: keywordLaneResultPayload(latestLaneResult) };
-    }
-
     const tags = buildTags(topic, keyword, agentResult.tags);
     latestTagsForResume = tags;
     emit("job:preview", {
@@ -1700,88 +1354,27 @@ async function startJob(form) {
       title: agentResult.title,
       article: agentResult.article,
       images: getPreviewImages(agentResult),
-      imageNotes: agentResult.imageWarnings || [],
+      imageNotes: [...(agentResult.imageWarnings || []),...(codexResult.publishable===false ? codexResult.notes || [] : [])],
       tokenUsage: jobTokenUsage,
       tags
     });
 
     let publishStatus = "generated";
-    let publishReason = "";
+    let publishReason = [...(codexResult.publishable===false ? codexResult.notes || [] : []),...(agentResult.imageWarnings || [])].join(" / ");
 
-    if (shouldPublish) {
+    if (shouldPublish && codexResult.publishable !== false && !agentResult.imageWarnings?.length) {
+      const durableDraft=buildPendingNaverPublishDraft({jobId,account,blogId,category,topic,keyword,agentResult,tags,publishPrivate,publishVisibility,publishScheduleMode,reserveAfterHours,breakSentencesInBody,publishToTistoryAfterNaver,tistoryBlogId,latestLaneResult,researchTitleResult,tokenUsage:jobTokenUsage});
+      writeSettings(runtimeRoot,{pendingNaverPublishDraft:durableDraft,pendingGenerationDraft:null});
+      fs.writeFileSync(path.join(jobDir,'publish-draft.json'),JSON.stringify(durableDraft,null,2));
       updateStatus(jobId, "publishing", `Naver 블로그 ${publishVisibility === "public" ? "전체공개" : "비공개"} 발행 자동화`);
-      await publishToNaver({
-        accountId: account.id || "",
-        blogId,
-        category,
-        publishPrivate,
-        publishVisibility,
-        publishScheduleMode,
-        reserveAfterHours,
-        failOnLoginRequired: form.failOnLoginRequired === true,
-        title: agentResult.title,
-        article: agentResult.article,
-        titleImagePath: agentResult.titleImagePath,
-        bodyImages: agentResult.bodyImages,
-        breakSentencesInBody,
-        tags,
-        domNotes: form.naverEditorDomNotes || "",
-        browserProfileDir,
-        preparedContext: preparedNaverSession?.context,
-        preparedPage: preparedNaverSession?.page,
-        log: (message, level) => safeLog(jobId, message, level)
-      });
-      if (account.id) {
-        updateAccountSession(runtimeRoot, account.id, "valid", settings);
-        emitAccountStore(runtimeRoot);
-      }
-      if (tistoryPublishReady) {
-        try {
-          updateStatus(jobId, "publishing", "네이버 발행 후 티스토리 발행");
-          const tistoryProfileDir = getTistoryProfileDir(runtimeRoot, tistoryBlogId);
-          const tistoryKey = tistorySessionKey(tistoryBlogId, tistoryProfileDir);
-          preparedTistorySession = reusableTistorySession(tistoryKey);
-          await publishToTistory({
-            tistoryBlogId,
-            category,
-            publishPrivate,
-            publishVisibility,
-            publishScheduleMode,
-            reserveAfterHours,
-            failOnLoginRequired: form.failOnLoginRequired === true,
-            title: agentResult.title,
-            article: agentResult.article,
-            titleImagePath: agentResult.titleImagePath,
-            bodyImages: agentResult.bodyImages,
-            breakSentencesInBody,
-            tags,
-            browserProfileDir: tistoryProfileDir,
-            preparedContext: preparedTistorySession?.context,
-            preparedPage: preparedTistorySession?.page,
-            runtimeRoot,
-            log: (message, level) => safeLog(jobId, message, level)
-          });
-          writeSettings(runtimeRoot, {
-            tistorySessionStatus: "valid",
-            tistorySessionCheckedAt: new Date().toISOString()
-          });
-          publishReason = "네이버와 티스토리 발행 완료.";
-        } catch (error) {
-          publishReason = `네이버 발행은 완료됐지만 티스토리 발행에 실패했습니다: ${error.message}`;
-          writeSettings(runtimeRoot, {
-            tistorySessionStatus: error.code === "TISTORY_SESSION_EXPIRED" ? "expired" : "unknown",
-            tistorySessionCheckedAt: new Date().toISOString()
-          });
-          safeLog(jobId, publishReason, "warn");
-        }
-      } else if (publishToTistoryAfterNaver) {
-        publishReason = "네이버 발행 완료. 티스토리 세션이 유효하지 않아 티스토리 발행은 건너뜁니다.";
-        safeLog(jobId, publishReason, "warn");
-      }
+      await publishSavedDraft(runtimeRoot,durableDraft,jobId);
+      publishReason=tistoryBlogId ? '네이버와 티스토리 발행 완료.' : '네이버 발행 완료.';
+      clearPendingNaverPublishDraft(runtimeRoot);
       publishStatus = "success";
       updateStatus(jobId, "success", "발행 완료");
     } else {
       publishReason = "사용자가 발행 실행을 끄고 생성만 실행했습니다.";
+      writeSettings(runtimeRoot,{pendingGenerationDraft:null});
       updateStatus(jobId, "generated", "본문 생성 완료, 발행 대기");
     }
 
@@ -1812,6 +1405,7 @@ async function startJob(form) {
       token_output: jobTokenUsage.outputTokens,
       prompt_characters: jobTokenUsage.promptCharacters,
       token_agents: jobTokenUsage.agents,
+      attempts:generationAttempts,
       reason: publishReason
     };
     appendHistory(runtimeRoot, entry);
@@ -1832,12 +1426,15 @@ async function startJob(form) {
     });
     return { status: publishStatus, keywordLane: keywordLaneResultPayload(latestLaneResult) };
   } catch (error) {
+    if(error.failureKind==='quality')writeSettings(runtimeRoot,{pendingGenerationDraft:null});
     const failedStatus = error.code === "SESSION_EXPIRED"
       ? "session_expired"
+      : error.code === "PUBLISH_UNCERTAIN" ? "publish_uncertain"
       : error.code === "CODEX_USAGE_LIMIT" ? "codex_usage_limit"
         : error.code === "CODEX_EXEC_FAILED" ? "codex_exec_failed"
           : "failed";
     persistCodexRateLimits(runtimeRoot, jobTokenUsage.rateLimits);
+    if(error.code==='PUBLISH_UNCERTAIN')writeSettings(runtimeRoot,{pendingNaverPublishDraft:{...readSettings(runtimeRoot).pendingNaverPublishDraft,status:'publish_uncertain'}});
     if (failedStatus === "session_expired" && account.id) {
       updateAccountSession(runtimeRoot, account.id, "expired", settings);
       emitAccountStore(runtimeRoot);
@@ -1887,6 +1484,7 @@ async function startJob(form) {
       token_output: jobTokenUsage.outputTokens,
       prompt_characters: jobTokenUsage.promptCharacters,
       token_agents: jobTokenUsage.agents,
+      attempts:error.attempts || generationAttempts,
       failure_phase: error.failurePhase || "",
       research_title: latestResearchTitleResult?.finalTitle || latestResearchTitleResult?.selectedTitle || "",
       reason: error.message
@@ -1900,6 +1498,8 @@ async function startJob(form) {
       article: latestAgentResultForResume?.article || "",
       images: latestAgentResultForResume ? getPreviewImages(latestAgentResultForResume) : [],
       failurePhase: error.failurePhase || "",
+      failureKind: error.failureKind || 'execution',
+      reason: error.message,
       tokenUsage: jobTokenUsage,
       tags: latestTagsForResume,
       history: readHistory(runtimeRoot)
@@ -1908,6 +1508,7 @@ async function startJob(form) {
       status: failedStatus,
       reason: error.message,
       failurePhase: error.failurePhase || "",
+      failureKind: error.failureKind || 'execution',
       keywordLane: keywordLaneResultPayload(latestLaneResult)
     };
   } finally {
@@ -1915,7 +1516,16 @@ async function startJob(form) {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  ipcMain.handle('window:theme', (event, theme) => {
+    if (event.sender !== mainWindow?.webContents || !['dark','light'].includes(theme)) return;
+    if (process.platform !== 'darwin') mainWindow.setTitleBarOverlay({color:theme === 'light' ? '#eaf5ed' : '#152030',symbolColor:theme === 'light' ? '#24352a' : '#edf3fc',height:40});
+  });
+  const bridge=configureBridge(getRuntimeRoot(),process.env.BLOGAUTO_TEST_BRIDGE_PORT === '0' ? 0 : undefined);
+
+  try {await bridge.start();}catch(error){bridgeError='확장 연결 포트를 사용할 수 없습니다. 다른 BlogAuto 앱을 종료하고 다시 실행하세요. '+error.message;}
+  bridge.on('status',()=>emit('accounts:update',connectionStore()));
+  bridge.on('progress',(_accountId,message)=>{if(activeJob)safeLog(activeJob.id,message);});
   ensureRuntimeFiles(getRuntimeRoot());
   ensureSettingsFile(getRuntimeRoot());
   ensureAccountStoreFile(getRuntimeRoot(), readSettings(getRuntimeRoot()));
@@ -1929,7 +1539,9 @@ app.whenReady().then(() => {
       codexCmdPath: resolveCodexCmdPath(settings.codexCmdPath),
       chrome: detectChromeInstall(),
       settings,
-      accountStore: withAccountImageUrls(runtimeRoot, readAccountStore(runtimeRoot, settings)),
+      accountStore: connectionStore(),
+      bridgeError,
+      pendingPreview:settings.pendingNaverPublishDraft ? {...settings.pendingNaverPublishDraft,images:getPreviewImages(settings.pendingNaverPublishDraft)} : null,
       history: readHistory(runtimeRoot)
     };
   });
@@ -1995,16 +1607,20 @@ app.whenReady().then(() => {
   });
   ipcMain.handle("accounts:save", (_event, store) => {
     const runtimeRoot = getRuntimeRoot();
-    const saved = writeAccountStore(runtimeRoot, store, readSettings(runtimeRoot));
-    const publicStore = withAccountImageUrls(runtimeRoot, saved);
+    const existing = readAccountStore(runtimeRoot, readSettings(runtimeRoot));
+    if (pendingPublishBusy() && existing.accounts.some(account => !store.accounts?.some(next => next.id === account.id))) {
+      throw new Error("작업 진행 중에는 계정을 삭제할 수 없습니다. 작업 종료 후 다시 시도하세요.");
+    }
+    writeAccountStore(runtimeRoot, store, readSettings(runtimeRoot));
+    const publicStore = connectionStore();
     emit("accounts:update", publicStore);
     return publicStore;
   });
   ipcMain.handle("accounts:chooseSampleImage", async (_event, accountId) => {
     const runtimeRoot = getRuntimeRoot();
     const settings = readSettings(runtimeRoot);
-    const store = readAccountStore(runtimeRoot, settings);
-    const account = store.accounts.find((item) => item.id === accountId);
+    let store = readAccountStore(runtimeRoot, settings);
+    let account = store.accounts.find((item) => item.id === accountId);
     if (!account) throw new Error("Account not found.");
     const result = await dialog.showOpenDialog(mainWindow, {
       title: "Choose sample image",
@@ -2012,8 +1628,12 @@ app.whenReady().then(() => {
       filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp"] }]
     });
     if (result.canceled || !result.filePaths?.[0]) {
-      return withAccountImageUrls(runtimeRoot, store);
+      return withAccountImageUrls(runtimeRoot, readAccountStore(runtimeRoot,settings));
     }
+    // The file picker yields: preserve edits and account deletions made while open.
+    store=readAccountStore(runtimeRoot,settings);
+    account=store.accounts.find(item=>item.id===accountId);
+    if(!account)throw new Error('이미지를 등록할 계정이 삭제되었습니다.');
     const sourcePath = result.filePaths[0];
     const destDir = accountAssetDir(runtimeRoot, account.id);
     fs.mkdirSync(destDir, { recursive: true });
@@ -2058,100 +1678,52 @@ app.whenReady().then(() => {
     emit("accounts:update", publicStore);
     return publicStore;
   });
-  ipcMain.handle("accounts:checkSession", async (_event, accountId, options = {}) => {
-    if (activeJob) {
-      throw new Error("작업 실행 중에는 계정 세션을 다시 확인할 수 없습니다.");
-    }
-    const runtimeRoot = getRuntimeRoot();
-    const settings = readSettings(runtimeRoot);
-    const store = readAccountStore(runtimeRoot, settings);
-    const account = store.accounts.find((item) => item.id === accountId);
-    if (!account) throw new Error("계정을 찾을 수 없습니다.");
-    const browserProfileDir = getAccountProfileDir(runtimeRoot, account);
-    const key = sessionKeyFor(account, browserProfileDir);
-    safeLog("session", `계정 profile: ${browserProfileDir}`);
-    const existingNaverSession = reusableNaverSession(key);
-    const result = existingNaverSession
-      ? await verifyOpenNaverSession({
-        blogId: account.blogId || account.naverId,
-        browserProfileDir,
-        preparedContext: existingNaverSession.context,
-        preparedPage: existingNaverSession.page,
-        interactiveLogin: true,
-        domNotes: settings.naverEditorDomNotes || "",
-        runtimeRoot,
-        log: (message, level) => safeLog("session", message, level)
-      })
-      : await checkNaverSession({
-        blogId: account.blogId || account.naverId,
-        browserProfileDir,
-        interactiveLogin: true,
-        keepOpen: true,
-        requireEditor: true,
-        domNotes: settings.naverEditorDomNotes || "",
-        runtimeRoot,
-        log: (message, level) => safeLog("session", message, level)
-      });
-    const { preparedSession, page, ...publicResult } = result;
-    if (options.includeTistorySession !== false && settings.publishToTistoryAfterNaver === true && settings.tistoryBlogId) {
-      try {
-        const tistoryProfileDir = getTistoryProfileDir(runtimeRoot, settings.tistoryBlogId);
-        const tistoryKey = tistorySessionKey(settings.tistoryBlogId, tistoryProfileDir);
-        const existingTistorySession = reusableTistorySession(tistoryKey);
-        const tistoryResult = existingTistorySession
-          ? {
-            status: "valid",
-            reason: "reused_open_tistory_editor",
-            url: existingTistorySession.page?.url?.() || "",
-            preparedSession: existingTistorySession
-          }
-          : await checkTistorySession({
-            tistoryBlogId: settings.tistoryBlogId,
-            browserProfileDir: tistoryProfileDir,
-            runtimeRoot,
-            keepOpen: true,
-            log: (message, level) => safeLog("session", message, level)
-          });
-        if (tistoryResult.preparedSession) {
-          activeTistorySessions.set(tistoryKey, tistoryResult.preparedSession);
-        }
-        publicResult.tistorySession = {
-          status: tistoryResult.status,
-          reason: tistoryResult.reason || "",
-          url: tistoryResult.url || ""
-        };
-        writeSettings(runtimeRoot, {
-          tistorySessionStatus: tistoryResult.status === "valid" ? "valid" : "unknown",
-          tistorySessionCheckedAt: new Date().toISOString()
-        });
-      } catch (error) {
-        publicResult.tistorySession = {
-          status: "expired",
-          reason: error.message
-        };
-        writeSettings(runtimeRoot, {
-          tistorySessionStatus: "expired",
-          tistorySessionCheckedAt: new Date().toISOString()
-        });
-      }
-    }
-    const sessionStatus = result.status === "valid"
-      ? "valid"
-      : result.status === "expired"
-        ? "expired"
-        : "unknown";
-    const saved = updateAccountSession(runtimeRoot, account.id, sessionStatus, settings);
-    emit("accounts:update", saved);
-    if (result.status !== "valid") {
-      safeLog("session", `${account.label || account.blogId || account.naverId} 계정 세션이 만료 상태입니다.`, "warn");
-      return publicResult;
-    }
-    if (preparedSession) {
-      activeNaverSessions.set(key, preparedSession);
-    }
-    safeLog("session", `${account.label || account.blogId || account.naverId} 계정 글쓰기 편집기 확인 완료.`);
-    return publicResult;
+  let bulkSessionPromise = null;
+  ipcMain.handle('accounts:checkAllSessions', () => {
+    if (bulkSessionPromise) return bulkSessionPromise;
+    if (pendingPublishBusy()) throw new Error('작업 종료 후 세션 일괄 확인을 실행하세요.');
+    const runtimeRoot=getRuntimeRoot();
+    const accounts=readAccountStore(runtimeRoot,readSettings(runtimeRoot)).accounts;
+    bulkSessionPromise=require('./lib/bulkSessions').checkBulkSessions(accounts,{
+      bridge:getBridge(),
+      open:account=>require('./lib/chromeLauncher').openAccountChrome(runtimeRoot,account,shell),
+      check:account=>account.platform==='tistory'
+        ? checkTistorySession({tistoryBlogId:account.blogId,interactiveLogin:true})
+        : checkNaverSession({accountId:account.id,blogId:account.blogId,interactiveLogin:true}),
+      log:message=>safeLog('session',message)
+    }).finally(()=>{bulkSessionPromise=null;emit('accounts:update',connectionStore());});
+    return bulkSessionPromise;
   });
+  ipcMain.handle('accounts:checkSession', async (_event,accountId,options={}) => {
+    const account=readAccountStore(getRuntimeRoot(),readSettings(getRuntimeRoot())).accounts.find(a=>a.id===accountId);
+    if(!account) throw new Error('계정을 찾을 수 없습니다.');
+    const result=await checkNaverSession({accountId,blogId:account.blogId,interactiveLogin:options.interactive!==false});
+    emit('accounts:update',connectionStore());
+    const {preparedSession,...publicResult}=result; return publicResult;
+  });
+  ipcMain.handle('chrome:openAccount',async(_event,id)=>{
+    const account=readAccountStore(getRuntimeRoot(),readSettings(getRuntimeRoot())).accounts.find(a=>a.id===id);
+    if(!account)throw new Error('먼저 블로그 계정을 추가하세요.');
+    return require('./lib/chromeLauncher').openAccountChrome(getRuntimeRoot(),account,shell);
+  });
+  ipcMain.handle('tistory:open',async(_event,blogId)=>require('./lib/chromeLauncher').openAccountChrome(getRuntimeRoot(),tistoryAccount(blogId),shell));
+  ipcMain.handle('tistory:pair',(_event,blogId)=>{
+    const account=tistoryAccount(blogId);
+    const pairing=getBridge().pairCode(account.id,account.blogId,account.label,'tistory');
+    clipboard.writeText(pairing.code);return pairing;
+  });
+  ipcMain.handle('extension:setup', async()=>{const folder=prepareExtension();await shell.openPath(folder);return {folder};});
+  ipcMain.handle('extension:copy',()=>{clipboard.writeText('chrome://extensions');return true;});
+  ipcMain.handle('extension:pair',(_event,accountId)=>{
+    if(bridgeError)throw new Error(bridgeError);
+    const account=readAccountStore(getRuntimeRoot(),readSettings(getRuntimeRoot())).accounts.find(a=>a.id===accountId);
+    if(!account)throw new Error('먼저 계정을 추가하세요.');
+    const pairing=getBridge().pairCode(account.id,account.blogId,account.label);clipboard.writeText(pairing.code);return pairing;
+  });
+  ipcMain.handle('extension:connections',()=>connectionStore());
+  ipcMain.handle('extension:cancel',(_event,id)=>{getBridge().cancelAccount(id);return connectionStore();});
+
+  ipcMain.handle('extension:revoke',(_event,id)=>{getBridge().revoke(id);return connectionStore();});
   ipcMain.handle("tistory:checkSession", async (_event, tistoryBlogId) => {
     if (activeJob) {
       throw new Error("작업 실행 중에는 티스토리 세션을 확인할 수 없습니다.");
@@ -2192,13 +1764,22 @@ app.whenReady().then(() => {
   });
   ipcMain.handle("tistory:testPublish", (_event, form) => startTistoryTestPublish(form));
   ipcMain.handle("history:load", () => readHistory(getRuntimeRoot()));
+  ipcMain.handle('job:pendingState',()=>pendingPublishState(getRuntimeRoot(),pendingPublishBusy()));
+  ipcMain.handle('job:cancelPending',()=>cancelPendingPublish(getRuntimeRoot(),pendingPublishBusy()));
   ipcMain.handle("job:start", (_event, form) => startJob(form));
+  ipcMain.handle('job:modelRetry', (event, choice) => {
+    if(event.sender!==mainWindow?.webContents || !modelRetryPending || choice.id!==modelRetryPending.id)return false;
+    if(!['retry','cancel'].includes(choice.action))return false;
+    if(choice.action==='retry' && choice.model && normalizeCodexModel(choice.model)!==choice.model)throw new Error('지원하지 않는 모델입니다.');
+    const pending=modelRetryPending;modelRetryPending=null;
+    pending.resolve({action:choice.action,model:choice.model});return true;
+  });
   ipcMain.handle("runtime:open", () => shell.openPath(getRuntimeRoot()));
   ipcMain.handle("file:open", (_event, filePath) => {
     if (!filePath) return false;
     const runtimeRoot = path.resolve(getRuntimeRoot());
     const resolved = path.resolve(String(filePath));
-    if (!resolved.startsWith(runtimeRoot)) {
+    if (path.relative(runtimeRoot, resolved).startsWith('..') || path.isAbsolute(path.relative(runtimeRoot, resolved))) {
       throw new Error("런타임 폴더 밖의 파일은 열 수 없습니다.");
     }
     return shell.openExternal(pathToFileURL(resolved).toString());
@@ -2207,7 +1788,7 @@ app.whenReady().then(() => {
     if (!filePath) return false;
     const runtimeRoot = path.resolve(getRuntimeRoot());
     const resolved = path.resolve(String(filePath));
-    if (!resolved.startsWith(runtimeRoot)) {
+    if (path.relative(runtimeRoot, resolved).startsWith('..') || path.isAbsolute(path.relative(runtimeRoot, resolved))) {
       throw new Error("런타임 폴더 밖의 파일 위치는 열 수 없습니다.");
     }
     shell.showItemInFolder(resolved);
@@ -2246,8 +1827,6 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
-  for (const session of activeNaverSessions.values()) {
-    session.context?.close().catch(() => {});
-  }
   activeNaverSessions.clear();
+  getBridge().stop();
 });
