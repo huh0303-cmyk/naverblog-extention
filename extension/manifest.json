@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BlogAuto · 네이버·티스토리 연결",
-  "version": "0.3.11",
+  "version": "0.3.12",
   "minimum_chrome_version": "120",
   "description": "일반 Chrome 로그인으로 네이버와 티스토리 글쓰기를 연결합니다.",
   "permissions": [

@@ -57,3 +57,14 @@ artifacts/
 **/account-chrome/
 **/extension-connections.json
 **/extension-tasks.json
+
+# Local development resources (not distributed)
+tests/
+docs/
+AGENTS.md
+scripts/*
+!scripts/dev-app.js
+runtime-template/
+packages/blog-humanizer/README.md
+packages/blog-humanizer/SKILL.md
+README.md

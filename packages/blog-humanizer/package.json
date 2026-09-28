@@ -5,6 +5,13 @@
   "main": "index.js",
   "type": "commonjs",
   "license": "MIT",
-  "engines": { "node": ">=18" },
-  "files": ["index.js", "SKILL.md", "references", "LICENSE", "NOTICE.md", "README.md"]
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "index.js",
+    "references",
+    "LICENSE",
+    "NOTICE.md"
+  ]
 }

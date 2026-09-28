@@ -1,6 +1,6 @@
 // This function runs only inside the editor's isolated world. No debugger or remote control.
 async function editorCommand(command, args = {}) {
-  const build='20260928.3';let step='locate';
+  const build='20260928.4';let step='locate';
   try {
   const visible = el => Boolean(el && el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden');
   const find = selector => [...document.querySelectorAll(selector)].find(visible);
@@ -410,18 +410,20 @@ async function editorCommand(command, args = {}) {
       if (!button) throw new Error('카테고리 선택을 확인할 수 없습니다.'); if(button.getAttribute('aria-expanded')!=='true'){button.click();await wait(150);}
       // Search the whole category menu, regardless of nesting depth. Accessibility
       // hints describe hierarchy, but are not part of the category's name.
+      const categoryKey=text=>String(text).normalize('NFC').replace(/[\s\u200b\ufeff]+/gu,'');
       const categoryName=el=>{
         if(!el)return '';
         const clone=el.cloneNode(true);
         clone.querySelectorAll('.blind, [aria-hidden="true"]').forEach(node=>node.remove());
-        return clone.textContent.replace(/[\u200b\ufeff]/g,'').replace(/\s+/g,' ').trim();
+        return categoryKey(clone.textContent);
       };
       const requested=String(args.category).replace(/\s+/g,' ').trim();
+      const requestedKey=categoryKey(args.category);
       const options=()=>[...(categoryButton()?.parentElement?.querySelector('[role="menu"]')?.querySelectorAll('label[for]') || [])]
         .filter(label=>label.querySelector('[data-testid^="categoryItemText_"]'));
       let candidates=[];
       for(let n=0;n<20;n++){
-        candidates=options().filter(label=>categoryName(label.querySelector('[data-testid^="categoryItemText_"]'))===requested);
+        candidates=options().filter(label=>categoryName(label.querySelector('[data-testid^="categoryItemText_"]'))===requestedKey);
         if(candidates.length)break;
         await wait(100);
       }
@@ -432,7 +434,7 @@ async function editorCommand(command, args = {}) {
       const selected=()=>{
         const current=categoryButton();
         const item=current?.querySelector('[data-testid^="categoryItemText_"]');
-        return current?.getAttribute('aria-expanded')==='false' && item?.getAttribute('data-testid')===itemId && categoryName(item)===requested;
+        return current?.getAttribute('aria-expanded')==='false' && item?.getAttribute('data-testid')===itemId && categoryName(item)===requestedKey;
       };
       category.scrollIntoView({block:'nearest'});category.click();
       for(let n=0;n<20 && !selected();n++)await wait(100);

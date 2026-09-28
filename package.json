@@ -5,48 +5,10 @@
   "main": "src/main.js",
   "scripts": {
     "start": "electron scripts/dev-app.js",
-    "start:runtime": "electron scripts/dev-app.js",
-    "check": "node scripts/check.js",
-    "dist": "electron-builder --win portable",
-    "dist:mac": "electron-builder --mac dmg",
-    "test": "node --test --experimental-test-isolation=none tests/*.test.js",
-    "test:ui": "electron scripts/smoke-electron.js",
-    "test:editor": "electron scripts/test-editor.js",
-    "test:documents": "node scripts/test-documents.js",
-    "icons": "node scripts/generate-icons.js"
-  },
-  "build": {
-    "appId": "com.local.blogauto.naver",
-    "productName": "Naver Blog Automator",
-    "directories": {
-      "output": "dist"
-    },
-    "files": [
-      "src/**/*",
-      "packages/blog-humanizer/**/*",
-      "package.json"
-    ],
-    "extraResources": [
-      {
-        "from": "runtime-template",
-        "to": "runtime"
-      },
-      {
-        "from": "extension",
-        "to": "extension"
-      }
-    ],
-    "win": {
-      "target": [
-        "portable"
-      ],
-      "artifactName": "Naver-Blog-Automator-${version}.${ext}",
-      "icon": "src/assets/app-icon.ico"
-    }
+    "start:runtime": "electron scripts/dev-app.js"
   },
   "devDependencies": {
-    "electron": "^44.4.3",
-    "electron-builder": "^26.15.3"
+    "electron": "^44.4.3"
   },
   "author": "BlogAuto contributors",
   "dependencies": {
