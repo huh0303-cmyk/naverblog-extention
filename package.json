@@ -5,10 +5,13 @@
   "main": "src/main.js",
   "scripts": {
     "start": "electron scripts/dev-app.js",
-    "start:runtime": "electron scripts/dev-app.js"
+    "start:runtime": "electron scripts/dev-app.js",
+    "dist": "electron-builder --win portable",
+    "dist:mac": "electron-builder --mac dmg"
   },
   "devDependencies": {
-    "electron": "^44.4.3"
+    "electron": "^44.4.3",
+    "electron-builder": "^26.15.3"
   },
   "author": "BlogAuto contributors",
   "dependencies": {
@@ -20,5 +23,34 @@
     "fflate": "^0.8.3",
     "pdfjs-dist": "^6.3.289",
     "tesseract.js": "^7.0.0"
+  },
+  "build": {
+    "appId": "com.local.blogauto.naver",
+    "productName": "Naver Blog Automator",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "packages/blog-humanizer/index.js",
+      "packages/blog-humanizer/package.json",
+      "packages/blog-humanizer/references/**/*",
+      "packages/blog-humanizer/LICENSE",
+      "packages/blog-humanizer/NOTICE.md",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "extension",
+        "to": "extension"
+      }
+    ],
+    "win": {
+      "target": [
+        "portable"
+      ],
+      "artifactName": "Naver-Blog-Automator-${version}.${ext}",
+      "icon": "src/assets/app-icon.ico"
+    }
   }
 }
