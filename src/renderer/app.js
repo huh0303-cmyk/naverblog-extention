@@ -42,16 +42,6 @@ const DEFAULT_AGENT_MODELS = {
   writer: "high",
   image: "medium"
 };
-const CODEX_MODEL_IDS = new Set([
-  "",
-  "gpt-5.6-sol",
-  "gpt-5.6-terra",
-  "gpt-5.6-luna",
-  "gpt-5.5",
-  "gpt-5.4",
-  "gpt-5.4-mini",
-  "gpt-5.3-codex"
-]);
 const AGENT_MODEL_SELECTORS = {
   main: "#mainAgentModel",
   research: "#researchAgentModel",
@@ -59,8 +49,6 @@ const AGENT_MODEL_SELECTORS = {
   image: "#imageWorkerModel"
 };
 const VALID_AGENT_MODEL_VALUES = new Set(["low", "medium", "high", "xhigh"]);
-const AUTO_TARGET_MAX_ATTEMPTS = 1;
-const AUTO_RESEARCH_MAX_ATTEMPTS = 1;
 const DEFAULT_IMAGE_ASPECT_RATIO = "16:9";
 const IMAGE_ASPECT_RATIOS = new Set([DEFAULT_IMAGE_ASPECT_RATIO, "9:16", "1:1", "3:4"]);
 
@@ -70,8 +58,8 @@ function normalizeImageAspectRatio(value) {
 }
 
 function normalizeCodexModel(value) {
-  const normalized = String(value || "").trim().toLowerCase();
-  return CODEX_MODEL_IDS.has(normalized) ? normalized : "";
+  const normalized = String(value || "").trim();
+  return /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,199}$/.test(normalized) ? normalized : "";
 }
 
 function normalizeSearchProvider(value, fallback = "naver") {
@@ -82,13 +70,6 @@ function normalizeSearchProvider(value, fallback = "naver") {
 function normalizeSearchChannel(value, fallback = "blog") {
   const normalized = String(value || "").trim().toLowerCase();
   return ["blog", "news", "web"].includes(normalized) ? normalized : fallback;
-}
-
-function searchChannelLabel(value) {
-  const channel = normalizeSearchChannel(value);
-  if (channel === "news") return "검색: 뉴스";
-  if (channel === "web") return "검색: 웹";
-  return "검색: 블로그";
 }
 
 function fallbackSearchProviderFor(primary) {
@@ -187,40 +168,7 @@ function addLog(payload) {
   stream.scrollTop = stream.scrollHeight;
 }
 
-function shouldRetryAutoResult(result) {
-  const status = String(result?.status || "").toLowerCase();
-  if (["success", "generated", "codex_usage_limit", "codex_exec_failed", "session_expired"].includes(status)) {
-    return false;
-  }
-  if (status === "duplicate_retry") return true;
-  return String(result?.failurePhase || "").toLowerCase() === "research";
-}
-
-function autoAttemptLimitForResult(result) {
-  return String(result?.failurePhase || "").toLowerCase() === "research"
-    ? AUTO_RESEARCH_MAX_ATTEMPTS
-    : AUTO_TARGET_MAX_ATTEMPTS;
-}
-
-function autoResultReason(result) {
-  return String(result?.reason || result?.failureReason || result?.status || "unknown").trim();
-}
-
-function keywordLanePhrasesFromResult(result) {
-  const lane = result?.keywordLane || {};
-  return [
-    lane.topicLane,
-    ...(Array.isArray(lane.selectedKeywordPhrases) ? lane.selectedKeywordPhrases : [])
-  ]
-    .map((phrase) => String(phrase || "").trim())
-    .filter(Boolean);
-}
-
 function runAutoStartJob(form) {
-  const testStartJob = window.__blogAutoTestHooks?.startJob;
-  if (typeof testStartJob === "function") {
-    return testStartJob(form);
-  }
   return window.blogAuto.startJob(form);
 }
 
@@ -485,7 +433,7 @@ function renderHistory(history) {
     const title = item.title || item.research_title || item.topic || "제목 없음";
     const meta = [
       item.category && `카테고리 ${item.category}`,
-      item.keyword && `키워드 ${item.keyword}`,
+
       item.blog_id && `블로그 ${item.blog_id}`
     ].filter(Boolean).join(" · ");
     const agentTokenText = Object.entries(item.token_agents || {})
@@ -494,6 +442,7 @@ function renderHistory(history) {
       .join(" · ");
     const detailRows = [
       ["주제", item.topic],
+      ["키워드", item.keyword],
       ["선택 lane", item.selected_lane || item.lane || item.keyword_lane],
       ["검색어", item.search_query || item.query],
       ["Research 제목", item.research_title],
@@ -512,15 +461,18 @@ function renderHistory(history) {
       ])
     ].filter(([, value]) => String(value || "").trim());
 
+    const retryLabel=['success','generated'].includes(item.status)?'완료':item.retry?.reason==='이후 재시도에서 완료된 작업'?'재시도 완료':item.retry?.allowed?'재시도':'재시도 불가';
     card.innerHTML = `
       <div class="history-card-top">
         ${statusBadge(item.status)}
         <span class="history-date">${escapeHtml(formatHistoryDate(item.create_at))}</span>
         <span class="history-token">${escapeHtml(formatTokens(item.token_total || 0))}</span>
+        <button type="button" class="history-retry" data-retry-allowed="${item.retry?.allowed===true}" data-ready-label="${escapeHtml(retryLabel)}" data-retry-reason="${escapeHtml(item.retry?.reason || '복구 가능한 기록 없음')}" ${item.retry?.allowed?'':'disabled'}>${retryLabel}</button>
       </div>
       <h3>${escapeHtml(title)}</h3>
       <p class="history-meta">${escapeHtml(meta || "작업 대상 정보 없음")}</p>
       <p class="history-reason">${escapeHtml(item.reason || item.source_summary || "기록된 사유가 없습니다.")}</p>
+      <p class="history-retry-note">${escapeHtml(item.retry?.reason || "")}</p>
       <details class="history-details">
         <summary>상세 보기</summary>
         <dl>
@@ -533,10 +485,31 @@ function renderHistory(history) {
         </dl>
       </details>
     `;
+    card.querySelector(".history-retry").onclick=()=>retryHistoryItem(item);
     body.appendChild(card);
   }
+  updateRunControls();
 }
 
+async function retryHistoryItem(item){
+ if(state.running || state.autoRunning || state.bulkChecking || !item.retry?.allowed)return;
+ const account=state.accountStore.accounts.find(a=>a.id===item.retry.accountId);
+ const category=account?.categories.find(c=>c.id===item.retry.categoryId || c.name===item.retry.category);
+ if(!account || !category)return;
+ state.running=true;state.retryingHistory=true;state.nextTarget=null;state.activeTarget={account,category};
+ $('#startButton').disabled=true;updateRunControls();
+ state.historyModalOpen=false;$('#historyModal').hidden=true;resetJobPreview(state.activeTarget);
+ setTargetProgress(state.activeTarget,'진행 중',item.retry.reason);
+ addLog({agent:'main',message:'작업 이력 재시도 · '+item.retry.reason});
+ try{
+  const result=await window.blogAuto.retryHistory(item.id,collectForm({account,category}));
+  setTargetProgress(state.activeTarget,result?.status==='success'?'완료':'실패',result?.reason || '');
+ }catch(error){setRunState('failed',error.message);setTargetProgress(state.activeTarget,'실패',error.message);addLog({agent:'main',level:'error',message:error.message});}
+ finally{
+  state.running=false;state.retryingHistory=false;$('#startButton').disabled=false;updateRunControls();
+  renderHistory(await window.blogAuto.loadHistory());await refreshPendingPublishButton();
+ }
+}
 function renderHistorySummary(items) {
   const total = items.length;
   const success = items.filter((item) => item.status === "success" || item.status === "generated").length;
@@ -816,8 +789,8 @@ function renderCategories() {
         <strong>${escapeHtml(category.name)}</strong>
       </div>
       <div class="category-actions">
-        <button type="button" class="ghost small" data-action="move-up" ${index === 0 ? "disabled" : ""}>위</button>
-        <button type="button" class="ghost small" data-action="move-down" ${index === account.categories.length - 1 ? "disabled" : ""}>아래</button>
+        <button type="button" class="ghost small" data-action="move-up" ${index === 0 ? "disabled" : ""} title="위로 이동" aria-label="위로 이동">▲</button>
+        <button type="button" class="ghost small" data-action="move-down" ${index === account.categories.length - 1 ? "disabled" : ""} title="아래로 이동" aria-label="아래로 이동">▼</button>
         <button type="button" class="ghost small" data-action="edit">수정</button>
         <button type="button" class="ghost small" data-action="delete">삭제</button>
       </div>
@@ -991,30 +964,9 @@ function autoTargetKey(target) {
   return `${accountId}::${categoryId}`;
 }
 
-function setPendingAutoTarget(target) {
-  state.autoPendingSessionTarget = {
-    key: autoTargetKey(target),
-    accountId: String(target?.account?.id || ""),
-    categoryId: String(target?.category?.id || target?.category?.name || ""),
-    accountLabel: accountDisplayName(target?.account),
-    categoryName: String(target?.category?.name || "")
-  };
-}
-
-function clearPendingAutoTarget(key = "") {
-  if (!key || state.autoPendingSessionTarget?.key === key) {
-    state.autoPendingSessionTarget = null;
-  }
-}
-
 function findAutoTargetIndex(targets, key) {
   const index = targets.findIndex((target) => autoTargetKey(target) === key);
   return index >= 0 ? index : 0;
-}
-
-function firstAutoTargetForAccount(accountId) {
-  const id = String(accountId || "");
-  return getAutoTargets().find((target) => String(target?.account?.id || "") === id) || null;
 }
 
 function readTistoryTargetInput(){
@@ -1124,7 +1076,6 @@ function collectForm(target = {}) {
     freshnessLevel: category?.freshnessLevel || "auto",
     searchChannel: normalizeSearchChannel(category?.searchChannel),
     trustBlogAsSource: category?.trustBlogAsSource === true,
-    codexCmdPath: "codex.cmd",
     codexModel: normalizeCodexModel($("#codexModel")?.value),
     primarySearchProvider: searchProviders.primarySearchProvider,
     fallbackSearchProvider: searchProviders.fallbackSearchProvider,
@@ -1169,7 +1120,11 @@ function applySettings(settings) {
   $("#includeTitleImage").checked = settings.includeTitleImage !== false;
   $("#titleImageAspectRatio").value = normalizeImageAspectRatio(settings.titleImageAspectRatio || settings.imageAspectRatio);
   $("#bodyImageAspectRatio").value = normalizeImageAspectRatio(settings.bodyImageAspectRatio || settings.imageAspectRatio);
-  if ($("#codexModel")) $("#codexModel").value = normalizeCodexModel(settings.codexModel);
+  if ($("#codexModel")) {
+    const selected = normalizeCodexModel(settings.codexModel);
+    preserveCodexSelection(selected);
+    $("#codexModel").value = selected;
+  }
   applyAgentModels(settings.agentModels);
   if (settings.publishPrivate === false) $("#publishVisibility").value = "public";
   updateModeControls();
@@ -1246,7 +1201,13 @@ function getAutoTargets() {
 }
 
 function updateRunControls() {
-  const busy = state.running || state.autoRunning || state.bulkChecking;
+  const busy = state.running || state.autoRunning || state.bulkChecking || state.retryingHistory;
+  document.querySelectorAll('.history-retry').forEach(button=>{
+    const allowed=button.dataset.retryAllowed==='true';
+    button.disabled=busy || !allowed;
+    button.textContent=busy && allowed?'작업 중':button.dataset.readyLabel;
+    button.title=busy && allowed?'현재 작업 종료 후 재시도할 수 있습니다.':button.dataset.retryReason;
+  });
   const bulkCheck=$('#bulkSessionCheckButton');
   if(bulkCheck)bulkCheck.disabled=busy || !state.accountStore.accounts.some(a=>a.checked!==false);
   $("#crossPublish").disabled = busy;
@@ -1254,22 +1215,6 @@ function updateRunControls() {
     button.disabled = busy;
     button.title = busy ? '작업 종료 후 삭제할 수 있습니다.' : '계정 삭제';
   });
-}
-
-function allNaverSessionsExpired(targets) {
-  return Boolean(targets.length) && targets.every((target) => target.account?.sessionStatus === "expired");
-}
-
-function nextDifferentAccountIndex(targets, index) {
-  if (!targets.length) return 0;
-  const currentAccountId = targets[index % targets.length]?.account?.id || "";
-  for (let offset = 1; offset <= targets.length; offset += 1) {
-    const nextIndex = (index + offset) % targets.length;
-    if ((targets[nextIndex]?.account?.id || "") !== currentAccountId) {
-      return nextIndex;
-    }
-  }
-  return index;
 }
 
 function delayAuto(minutes) {
@@ -1293,51 +1238,6 @@ function delayAuto(minutes) {
       setRunState("generated", `다음 발행까지 ${Math.ceil(remaining / 1000)}초`);
       if (remaining <= 0) finish();
       else window.setTimeout(tick, Math.min(1000, remaining));
-    };
-    tick();
-  });
-}
-
-function waitForAccountSessionOrTerm(accountId, minutes) {
-  const waitingAccountId = String(accountId || "");
-  const ms = Math.max(1, Number(minutes || 1)) * 60 * 1000;
-  return new Promise((resolve) => {
-    if (state.autoResumeAccountId === waitingAccountId) {
-      state.autoResumeAccountId = "";
-      resolve("session");
-      return;
-    }
-    let settled = false;
-    const started = Date.now();
-    const wake = () => {
-      if (state.autoResumeAccountId === waitingAccountId) {
-        finish("session");
-      }
-    };
-    const finish = (reason) => {
-      if (settled) return;
-      settled = true;
-      if (state.autoDelayWake === wake) state.autoDelayWake = null;
-      if (reason === "session") state.autoResumeAccountId = "";
-      resolve(reason);
-    };
-    state.autoDelayWake = wake;
-    const tick = () => {
-      if (!state.autoRunning) {
-        finish("stopped");
-        return;
-      }
-      if (state.autoResumeAccountId === waitingAccountId) {
-        finish("session");
-        return;
-      }
-      const remaining = Math.max(0, ms - (Date.now() - started));
-      setRunState("session_expired", `세션 확인 대기 중 ${Math.ceil(remaining / 1000)}초`);
-      if (remaining <= 0) {
-        finish("term");
-        return;
-      }
-      window.setTimeout(tick, Math.min(1000, remaining));
     };
     tick();
   });
@@ -1461,7 +1361,7 @@ async function startTistoryTestPublish() {
     renderImages(result.images || []);
     renderImageNotes(result.imageNotes || []);
   } finally {
-    if (!state.autoRunning) {
+    if (!state.autoRunning && !state.retryingHistory) {
       state.running = false;
       $("#startButton").disabled = false;updateRunControls();
       setTistoryTestButtonDisabled(false);
@@ -1472,9 +1372,11 @@ async function startTistoryTestPublish() {
 async function boot() {
   const initial = await window.blogAuto.getInitialData();
   $("#runtimePath").textContent = initial.runtimeRoot;
+  renderCodexInstallation(initial.codexInstallation);
   state.chrome = initial.chrome || state.chrome;
   state.accountStore = initial.accountStore || state.accountStore;
   applySettings(initial.settings || {});
+  refreshCodexCatalog();
   setCodexRateLimits(initial.settings?.codexRateLimits || null);
   refreshCodexUsageOnStartup();
   showStartupNoticeIfNeeded();
@@ -1537,7 +1439,7 @@ async function boot() {
     $("#articleMeta").textContent = payload.verdict || payload.status || "제목 선정 완료";
   });
   window.blogAuto.onComplete((payload) => {
-    if (!state.autoRunning) {
+    if (!state.autoRunning && !state.retryingHistory) {
       state.running = false;
       $("#startButton").disabled = false;updateRunControls();
       setTistoryTestButtonDisabled(false);
@@ -1810,9 +1712,6 @@ async function boot() {
   $("#clearLogButton").addEventListener("click", () => {
     clearAgentLogs();
   });
-  $("#openRuntimeButton").addEventListener("click", () => {
-    window.blogAuto.openRuntimeFolder();
-  });
   $("#dismissSessionNoticeButton").addEventListener("click", () => {
     $("#sessionNotice").hidden = true;
   });
@@ -1870,10 +1769,10 @@ boot().catch((error) => {
 });
 
 // Theme and connection controls stay on the workspace; no navigation menu.
-const applyTheme=theme=>{document.documentElement.dataset.theme=theme;$('#themeToggle').textContent=theme==='dark'?'라이트 모드':'다크 모드';$('#themeToggle').setAttribute('aria-pressed',String(theme==='light'));localStorage.setItem('blogauto-theme',theme);window.blogAuto.setWindowTheme(theme).catch(console.error);};
+const applyTheme=theme=>{document.documentElement.dataset.theme=theme;const button=$('#themeToggle'),label=theme==='dark'?'라이트 모드로 전환':'다크 모드로 전환';button.innerHTML=theme==='dark'?'<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></svg>':'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 15.5A9 9 0 0 1 8.5 4a9 9 0 1 0 11.5 11.5Z"/></svg>';button.title=label;button.setAttribute('aria-label',label);$('#themeToggle').setAttribute('aria-pressed',String(theme==='light'));localStorage.setItem('blogauto-theme',theme);window.blogAuto.setWindowTheme(theme).catch(console.error);};
 applyTheme(localStorage.getItem('blogauto-theme')==='light'?'light':'dark');
 $('#themeToggle').onclick=()=>applyTheme(document.documentElement.dataset.theme==='dark'?'light':'dark');
-$('#extensionSetup').onclick=()=>{$('#extensionGuide').hidden=false;};
+
 $('#closeExtensionGuide').onclick=()=>{$('#extensionGuide').hidden=true;};
 $('#prepareExtensionFolder').onclick=async()=>{try{const result=await window.blogAuto.prepareExtension();$('#extensionFolder').textContent=result.folder+' · 경로 복사 완료';}catch(e){$('#extensionFolder').textContent=e.message;}};
 $('#copyExtensionsUrl').onclick=()=>window.blogAuto.copyExtensionsUrl();
@@ -1924,3 +1823,35 @@ window.blogAuto.onModelError(payload=>{
   $('#cancelModelRetry').onclick=()=>respond('cancel');
   $('#retrySameModel').focus();
 });
+
+function renderCodexInstallation(result){
+ const badge=$('#codexInstallBadge');const installed=result?.installed===true;
+ badge.textContent=installed?'Codex 설치됨':result?'Codex 미감지':'Codex 확인 중';
+ badge.className='badge '+(installed?'success':'unknown');
+ badge.title=installed?'로컬 실행 파일 확인: '+result.path+' · 로그인·모델 응답 상태와 별개입니다.':'설정 경로와 PATH에서 Codex 실행 파일을 찾지 못했습니다. 설치 후 앱으로 돌아오면 다시 확인합니다.';
+}
+function preserveCodexSelection(value){
+ const select=$('#codexModel');
+ if(value && ![...select.options].some(option=>option.value===value))select.add(new Option(value+' (선택 유지)',value));
+}
+let codexCatalogPending=false;
+async function refreshCodexCatalog(){
+ if(codexCatalogPending)return;
+ codexCatalogPending=true;
+ try{
+  const result=await window.blogAuto.getCodexModels();
+  renderCodexInstallation(result.installation);
+  const select=$('#codexModel'),selected=select.value;
+  if(result.models?.length){
+   const signature=JSON.stringify(result.models);
+   if(select.dataset.catalog!==signature){
+    select.replaceChildren(new Option('Codex 기본값',''),...result.models.map(model=>new Option(model.displayName,model.id)));
+    preserveCodexSelection(selected);select.value=selected;select.dataset.catalog=signature;
+   }
+  }
+  select.title=result.status==='ready'?'설치된 Codex에서 확인한 모델 목록':result.status==='not_installed'?'Codex 설치 후 모델 목록을 확인합니다.':'모델 목록을 갱신하지 못했습니다. 기존 선택을 유지하며 다음 확인 때 재시도합니다.';
+ }catch{$('#codexModel').title='모델 목록 확인 실패 · 기존 선택 유지';}
+ finally{codexCatalogPending=false;}
+}
+window.addEventListener('focus',refreshCodexCatalog);
+setInterval(()=>{if(!document.hidden)refreshCodexCatalog();},300000);

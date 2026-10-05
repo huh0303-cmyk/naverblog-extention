@@ -1,6 +1,6 @@
 // This function runs only inside the editor's isolated world. No debugger or remote control.
 async function editorCommand(command, args = {}) {
-  const build='20260928.4';let step='locate';
+  const build='20260928.6';let step='locate';
   try {
   const visible = el => Boolean(el && el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden');
   const find = selector => [...document.querySelectorAll(selector)].find(visible);
@@ -52,43 +52,19 @@ async function editorCommand(command, args = {}) {
     throw new Error('입력 프레임 중첩 한도를 초과했습니다.');
   };
   const activateParagraph = async el => {
+    if(find('.se-popup-container,[role="dialog"][aria-modal="true"]'))throw new Error('편집기 팝업이 열려 있습니다. 팝업을 처리한 뒤 다시 시작해 주세요.');
     const id=el.id;
     el.scrollIntoView({block:'center',behavior:'instant'});
-    let priorBounds='';
-    const settled=await waitFor(()=>{
-      const current=id?document.getElementById(id):el;
-      if(!current || !visible(current))return false;
-      const r=current.getBoundingClientRect(),bounds=[r.left,r.top,r.right,r.bottom,r.height].join(',');
-      const stable=bounds===priorBounds;priorBounds=bounds;
-      return stable && r.top<innerHeight && r.top+r.height>0;
-    });
-    if(!settled)throw new Error('입력 요소의 스크롤·배치가 안정되지 않았습니다. 글자 입력 전 중지했습니다.');
     el=id?document.getElementById(id):el;
     if(!el)throw new Error('입력 요소가 변경됐습니다. 문서를 다시 확인해야 합니다.');
     const rect=el.getBoundingClientRect();
     const lastNode=[...(el.querySelectorAll?.('.__se-node') || [])].filter(n=>n.textContent).at(-1);
     const tail=lastNode ? [...lastNode.getClientRects()].at(-1) : null;
-    // A single tail coordinate may land outside a wrapped line or on a placeholder.
-    // DOM hit testing says nothing about other OS windows covering Chrome.
-    const boxes=[tail,...el.getClientRects(),rect].filter(r=>r && Number.isFinite(r.left) && Number.isFinite(r.top));
-    let point=null,hit=null;
-    for(const box of boxes){
-      const left=Math.max(0,box.left),right=Math.min(innerWidth,box.right ?? box.left+(box.width || 30));
-      const top=Math.max(0,box.top),bottom=Math.min(innerHeight,box.bottom ?? box.top+box.height);
-      if(right-left<2 || bottom-top<2)continue;
-      for(const fraction of [0.5,0.1,0.9]){
-        const x=left+(right-left)*fraction,y=top+(bottom-top)/2;
-        hit=document.elementFromPoint(x,y);
-        const placeholder=hit?.closest?.('.se-placeholder,.se-placeholder-text');
-        const titleContainer=el.closest?.('.se-documentTitle,.se-title-text');
-        if(hit && (hit===el || el.contains?.(hit) || (placeholder && titleContainer?.contains?.(placeholder)))){
-          point={x,y,target:placeholder?el:hit};break;
-        }
-      }
-      if(point)break;
-    }
-    if(!point)throw new Error(`페이지 내부 입력 위치를 확인하지 못했습니다 (감지 요소: ${hit?.tagName || '없음'} ${String(hit?.className || '').slice(0,160)}, 문서 상태: ${document.visibilityState || 'unknown'}). 페이지 내 팝업·스크롤 위치를 확인하세요. 다른 프로그램 창의 앞뒤 순서는 가림 판정 대상이 아닙니다.`);
-    const {x,y,target}=point;
+    // Send selection events to the resolved paragraph itself. Paint hit-testing
+    // is unreliable for background/minimized documents and is not model selection.
+    const box=tail || rect;
+    const x=box.left+Math.max(1,(box.width || 2)/2),y=box.top+Math.max(1,(box.height || 2)/2);
+    const target=lastNode || el;
     // SmartEditor selects its model/caret on mousedown, not HTMLElement.click().
     for(const type of ['mousedown','mouseup','click'])target.dispatchEvent(new MouseEvent(type,{bubbles:true,cancelable:true,clientX:x,clientY:y,button:0,buttons:type==='mousedown'?1:0,view:window}));
     await wait(100);
@@ -166,9 +142,7 @@ async function editorCommand(command, args = {}) {
         const rect=add.getBoundingClientRect();
         const x=Math.max(1,Math.min(innerWidth-1,rect.left+rect.width/2));
         const y=Math.max(1,Math.min(innerHeight-1,rect.top+Math.min(rect.height/2,25)));
-        const hit=document.elementFromPoint(x,y);
-        if(!hit || (hit!==add && !add.contains(hit)))throw new Error('본문 추가 위치가 다른 패널에 가려져 있습니다. 라이브러리 패널을 닫고 다시 확인하세요.');
-        for(const type of ['mousedown','mouseup','click'])hit.dispatchEvent(new MouseEvent(type,{bubbles:true,cancelable:true,clientX:x,clientY:y,button:0,buttons:type==='mousedown'?1:0,view:window}));
+        for(const type of ['mousedown','mouseup','click'])add.dispatchEvent(new MouseEvent(type,{bubbles:true,cancelable:true,clientX:x,clientY:y,button:0,buttons:type==='mousedown'?1:0,view:window}));
         await waitFor(()=>{const end=paragraphs().at(-1);return end && !readText(end).trim() && end!==target && bodyText()===beforeText;});target=paragraphs().at(-1);
       }
       if(!target || readText(target).trim() || bodyText()!==beforeText)throw new Error(`새 입력 영역 확인 실패: 빈 문단 ${Boolean(target && !readText(target).trim())}, 원문 보존 ${bodyText()===beforeText}, 본문 길이 ${beforeText.length} → ${bodyText().length}. 기존 내용은 자동 삭제하지 않습니다.`);
@@ -176,6 +150,19 @@ async function editorCommand(command, args = {}) {
     }
     if(!target)throw new Error('본문 입력 위치를 찾지 못했습니다.');await activateParagraph(target);return target;
   };
+  if(command==='dismissResume'){
+    // Confirmed on the live Naver editor: match this dialog, never a generic cancel.
+    const dialogs=[...document.querySelectorAll('.se-popup-container')].filter(visible);
+    for(const dialog of dialogs){
+      const heading=dialog.querySelector('.se-popup-title')?.textContent.trim();
+      const message=dialog.querySelector('.se-popup-alert-text')?.textContent || '';
+      if(heading!=='작성 중인 글이 있습니다.' || !message.includes('이어서 작성하시겠습니까?'))continue;
+      const cancel=dialog.querySelector('button.se-popup-button-cancel');
+      if(!visible(cancel) || cancel.textContent.trim()!=='취소')return {ok:false,error:'임시글 이어쓰기 창의 취소 버튼을 확인하지 못했습니다. Chrome에서 취소해 주세요.'};
+      cancel.click();return {ok:true,dismissed:true};
+    }
+    return {ok:true,dismissed:false};
+  }
   if(command==='snapshot'){
     const blocks=[];
     for(const el of document.querySelectorAll('.se-component')){
@@ -260,7 +247,6 @@ async function editorCommand(command, args = {}) {
   if(command==='probeTitle'){
     const describe=el=>el ? el.tagName+'.'+String(el.className || '').slice(0,90)+' editable='+el.isContentEditable : '없음';
     await activateParagraph(title);
-    const inputs=[...document.querySelectorAll('textarea,[contenteditable]')].slice(0,5).map(describe).join(' | ');
     const receiver=resolveInput();return {ok:true,reason:'입력문서 '+(receiver.doc===document?'현재 문서':'별도 프레임')+' / 활성 '+describe(receiver.active)+' / 표시 '+describe(title)};
   }
   if (command === 'title') {

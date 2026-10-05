@@ -41,7 +41,13 @@ const {
 } = require("./lib/accountStore");
 
 const { configureBridge, getBridge } = require('./lib/extensionBridge');
-const {pendingPublishState,cancelPendingPublish}=require('./lib/pendingPublish');
+const {pendingPublishState,cancelPendingPublish,savePublicationState}=require('./lib/pendingPublish');
+const {retryPlan,publicPlan,jobFile}=require('./lib/historyRetry');
+function historyForUi(root){
+ const history=readHistory(root),settings=readSettings(root),accounts=readAccountStore(root,settings).accounts;
+ return history.map(item=>({...item,retry:publicPlan(retryPlan(root,item,history,settings,accounts))}));
+}
+
 function pendingPublishBusy(){return Boolean(activeJob) || [...getBridge().tasks.values()].some(t=>t.type==='publish' && ['queued','running'].includes(t.state));}
 const {retrieveResearch}=require('./lib/researchRetrieval');
 let bridgeError = '';
@@ -57,7 +63,6 @@ function prepareExtension() {
 }
 let mainWindow;
 let activeJob = null;
-const activeNaverSessions = new Map();
 const activeTistorySessions = new Map();
 
 app.disableHardwareAcceleration();
@@ -166,10 +171,6 @@ function emitAccountStore(runtimeRoot) {
   emit("accounts:update", connectionStore());
 }
 
-function sessionKeyFor(account, browserProfileDir) {
-  return account?.id || browserProfileDir;
-}
-
 function safeProfileSegment(value) {
   return String(value || "profile")
     .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_")
@@ -263,27 +264,11 @@ function buildTistoryTestArticle() {
 
 function detectChromeInstall(){const chromePath=require('./lib/chromeLauncher').findChrome();return {available:Boolean(chromePath),path:chromePath};}
 
-async function closeNaverSession(key) {
-  const session = activeNaverSessions.get(key);
-  if (!session) return;
-  activeNaverSessions.delete(key);
-
-}
-
 async function closeTistorySession(key) {
   const session = activeTistorySessions.get(key);
   if (!session) return;
   activeTistorySessions.delete(key);
 
-}
-
-function reusableNaverSession(key) {
-  const session = activeNaverSessions.get(key);
-  if (!session?.context || session.page?.isClosed?.()) {
-    activeNaverSessions.delete(key);
-    return null;
-  }
-  return session;
 }
 
 function reusableTistorySession(key) {
@@ -364,6 +349,8 @@ function buildPendingNaverPublishDraft({
     tistoryBlogId,
     keywordLane: keywordLaneResultPayload(latestLaneResult),
     researchTitle: researchTitleResult?.finalTitle || researchTitleResult?.selectedTitle || "",
+    topicThesis: researchTitleResult?.topicThesis || '',
+    readerQuestion: researchTitleResult?.writerContract?.contentStrategy?.primaryQuestion || '',
     factBased: researchTitleResult?.factBased === true,
     sourceSummary: researchTitleResult?.searchFlowSummary || "",
     tokenTotal: Number(tokenUsage?.total || 0)
@@ -451,16 +438,10 @@ function normalizeResearchLaneResult(researchResult, lanePlan) {
   const fallback = Array.isArray(lanePlan?.recommended) ? lanePlan.recommended[0] : null;
   if (!selected.length && fallback) selected.push(fallback);
   const topicLane = String(researchResult?.topicLane || selected[0]?.phrase || "").trim();
-  const lanePhrases = lanes.map((lane) => lane.phrase.toLowerCase());
   const searchQueries = (Array.isArray(researchResult?.searchQueries) ? researchResult.searchQueries : [])
     .map((query) => String(query || "").replace(/\s+/g, " ").trim())
     .filter(Boolean)
-    .filter((query) => {
-      if (query.length > 140) return false;
-      const lower = query.toLowerCase();
-      const matchedLaneCount = lanePhrases.filter((phrase) => phrase && lower.includes(phrase)).length;
-      return true; // Related/nested keyword phrases must not invalidate a specific query.
-    })
+    .filter((query) => query.length <= 140)
     .slice(0, 4);
   return {
     topicLane,
@@ -530,25 +511,6 @@ function uniqueSearchQueries(values, limit = 4) {
   return queries;
 }
 
-function detectCodexSourceFailure(result) {
-  const status = String(result?.status || "").toLowerCase();
-  const explicitReason = String(result?.failureReason || result?.reason || "").trim();
-  if (["failed", "failure", "source_failed", "insufficient_sources"].includes(status)) {
-    return explicitReason || "본문 발췌 실패: Codex가 발행 가능한 근거 자료를 확보하지 못했습니다.";
-  }
-  if (explicitReason) return explicitReason;
-  return "";
-}
-
-function normalizeTopicTitle(title, fallback) {
-  const cleaned = String(title || "")
-    .replace(/\s*[-|:]\s*(네이버|NAVER|Google|구글|뉴스|블로그|카페).*$/i, "")
-    .replace(/\[[^\]]*(광고|AD|Sponsored)[^\]]*\]/gi, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  return cleaned || fallback;
-}
-
 function todayLabel() {
   const now = new Date();
   return `${now.getFullYear()}년 ${now.getMonth() + 1}월 ${now.getDate()}일`;
@@ -576,12 +538,6 @@ function resolveAccount(form, accountStore) {
   };
 }
 
-function createSessionExpiredError(reason = "네이버 세션이 만료되어 사용자 로그인이 필요합니다.") {
-  const error = new Error(reason);
-  error.code = "SESSION_EXPIRED";
-  return error;
-}
-
 async function verifyPublishSessionBeforeGeneration({ account, blogId, jobId }) {
   updateStatus(jobId,'publishing','연결된 Chrome의 글쓰기 권한 확인');
   const connection = getBridge().snapshot(account.id);
@@ -602,7 +558,7 @@ async function verifyTistorySessionBeforeGeneration({form, jobId}) {
 
 async function publishSavedDraft(runtimeRoot, draft, jobId) {
   return publishSequence(draft, {
-    save: value=>writeSettings(runtimeRoot,{pendingNaverPublishDraft:value}),
+    save: value=>savePublicationState(runtimeRoot,value,jobId),
     log: message=>safeLog(jobId,message),
     naver: value=>publishToNaver({...value,log:message=>safeLog(jobId,message)}),
     tistory: value=>{
@@ -695,7 +651,7 @@ async function startTistoryTestPublish(form = {}) {
       images,
       imageNotes: ["티스토리 전용 테스트 이미지가 로컬에서 생성되었습니다."],
       tokenUsage: { total: 0 },
-      history: readHistory(runtimeRoot)
+      history: historyForUi(runtimeRoot)
     };
     emit("job:complete", payload);
     return payload;
@@ -734,6 +690,11 @@ async function startJob(form) {
   ensureAccountStoreFile(runtimeRoot, settings);
 
   const jobId = `job_${Date.now()}`;
+  const prior=settings.pendingNaverPublishDraft || settings.pendingGenerationDraft;
+  if(prior?.jobId){
+    const file=jobFile(runtimeRoot,jobId,'retry-context.json');fs.mkdirSync(path.dirname(file),{recursive:true});
+    fs.writeFileSync(file,JSON.stringify({retry_of:prior.jobId,retry_root_id:prior.retryRootId || prior.jobId}));
+  }
   activeJob = { id: jobId, cancelled: false };
 
   const accountStore = readAccountStore(runtimeRoot, settings);
@@ -741,7 +702,7 @@ async function startJob(form) {
   const category = String(form.category || "").trim();
   const blogId = String(form.blogId || account.blogId || account.naverId || "").trim();
   const codexCmdPath = resolveCodexCmdPath(form.codexCmdPath || settings.codexCmdPath);
-  const codexModel = normalizeCodexModel(form.codexModel || settings.codexModel);
+  const codexModel = normalizeCodexModel(form.codexModel ?? settings.codexModel);
   const publishVisibility = String(form.publishVisibility || (form.publishPrivate === false ? "public" : "private"));
   const publishPrivate = publishVisibility !== "public";
   const publishScheduleMode = String(form.publishScheduleMode || "now");
@@ -767,7 +728,7 @@ async function startJob(form) {
     try {
       if(pendingRecovery.category!==category)throw Object.assign(new Error('발행 결과 확인이 필요한 이전 원고의 카테고리를 선택하세요. 새 원고 생성은 중지했습니다.'),{code:'PUBLISH_UNCERTAIN'});
       settings.pendingNaverPublishDraft=await require('./lib/publishRecovery').recoverPendingPublication(pendingRecovery,{
-        bridge:getBridge(),save:value=>writeSettings(runtimeRoot,{pendingNaverPublishDraft:value}),log:message=>safeLog(jobId,message)
+        bridge:getBridge(),save:value=>savePublicationState(runtimeRoot,value,jobId),log:message=>safeLog(jobId,message)
       });
     } catch(error){activeJob=null;throw error;}
   }
@@ -799,7 +760,7 @@ async function startJob(form) {
   }
   // Preserve the queue position before connection/login preflight can fail.
   if(!pendingRecovery && !generationDraft){
-    writeSettings(runtimeRoot,{pendingGenerationDraft:{accountId:account.id,blogId,category,jobId,status:'generation_pending',checkpoint:null}});
+    writeSettings(runtimeRoot,{pendingGenerationDraft:{accountId:account.id,blogId,category,jobId,retryRootId:prior?.retryRootId || prior?.jobId || jobId,status:'generation_pending',checkpoint:null}});
   }
 
   let preparedNaverSession = null;
@@ -831,12 +792,12 @@ async function startJob(form) {
       safeLog(jobId, "Naver 세션 확인 완료. 주제 입력값 준비 단계로 이동합니다.");
     }
   } catch (error) {
+    appendHistory(runtimeRoot,{id:jobId,create_at:new Date().toISOString(),account_id:account.id,blog_id:blogId,category,title:'',status:error.code==='SESSION_EXPIRED'?'session_expired':'failed',failure_phase:'connection',failure_kind:'execution',reason:error.message});
     activeJob = null;
     if (error.code === "SESSION_EXPIRED") {
       if (account.id) {
         updateAccountSession(runtimeRoot, account.id, "expired", settings);
         emitAccountStore(runtimeRoot);
-        await closeNaverSession(sessionKeyFor(account, browserProfileDir));
       }
       safeLog(jobId, error.message, "warn");
       updateStatus(jobId, "session_expired", error.message);
@@ -854,7 +815,7 @@ async function startJob(form) {
         imageNotes: [],
         tokenUsage: { total: 0 },
         tags: [],
-        history: readHistory(runtimeRoot)
+        history: historyForUi(runtimeRoot)
       });
       return { status: "session_expired", reason: error.message };
     }
@@ -979,6 +940,8 @@ async function startJob(form) {
         final_verdict: "PASS",
         failure_phase: "",
         research_title: pendingDraft.researchTitle || "",
+        topic_thesis: pendingDraft.topicThesis || '',
+        reader_question: pendingDraft.readerQuestion || '',
         fact_based: pendingDraft.factBased === true,
         source_summary: pendingDraft.sourceSummary || "",
         embedding_model: "local-hash-v1",
@@ -996,7 +959,7 @@ async function startJob(form) {
         imageNotes: [],
         tokenUsage: jobTokenUsage,
         tags: resumeTags,
-        history: readHistory(runtimeRoot)
+        history: historyForUi(runtimeRoot)
       });
       return { status: "success", resumedPendingPublish: true };
     } catch (error) {
@@ -1005,6 +968,7 @@ async function startJob(form) {
         updateAccountSession(runtimeRoot, account.id, "expired", settings);
         emitAccountStore(runtimeRoot);
       }
+      appendHistory(runtimeRoot,{id:jobId,create_at:new Date().toISOString(),account_id:account.id,blog_id:blogId,category,title:resumeAgentResult.title,status:error.code==='PUBLISH_UNCERTAIN'?'publish_uncertain':'failed',failure_phase:'publish',failure_kind:'execution',reason:error.message});
       safeLog(jobId, error.message, "error");
       updateStatus(jobId, error.code === "SESSION_EXPIRED" ? "session_expired" : error.code === "PUBLISH_UNCERTAIN" ? "publish_uncertain" : "failed", error.message);
       emit("job:complete", {
@@ -1015,7 +979,7 @@ async function startJob(form) {
         images: getPreviewImages(resumeAgentResult),
         tags: resumeTags,
         tokenUsage: jobTokenUsage,
-        history: readHistory(runtimeRoot)
+        history: historyForUi(runtimeRoot)
       });
       return {
         status: error.code === "SESSION_EXPIRED" ? "session_expired" : error.code === "PUBLISH_UNCERTAIN" ? "publish_uncertain" : "failed",
@@ -1029,12 +993,11 @@ async function startJob(form) {
   try {
     const currentDateLabel = todayLabel();
     const history = readHistory(runtimeRoot);
-    const accountHistory = history.filter((entry) => String(entry.blog_id || "") === blogId);
-    keywordLanePlan = buildKeywordLanePlan(keyword, history, { blogId, category, excludedKeywordLanes });
+    const accountHistory = require('./lib/topicHistory').accountHistory(history,{accountId:account.id,blogId});
+    keywordLanePlan = buildKeywordLanePlan(keyword, accountHistory, { category, excludedKeywordLanes });
     latestLaneResult = normalizeResearchLaneResult({}, keywordLanePlan);
-    const titleHistory = accountHistory
-      .filter((entry) => entry.title && ["success","generated"].includes(entry.status))
-      .map((entry) => ({ title: entry.title, embedding: entry.embedding }));
+    const publishedTopicHistory=require('./lib/topicHistory').publishedTopics(accountHistory);
+    const titleHistory = accountHistory.filter(entry=>entry.title && ['success','generated'].includes(entry.status)).map(entry=>({title:entry.title}));
 
     const usesImages = includeTitleImage || maxBodyImages > 0;
     const generationSubject = topic || `${category} ${keyword}`.trim();
@@ -1061,7 +1024,7 @@ async function startJob(form) {
       codexResult = await runCodexGeneration({
         generationCheckpoint: generationDraft?.checkpoint || null,
         onGenerationCheckpoint: checkpoint => {
-          writeSettings(runtimeRoot,{pendingGenerationDraft:{accountId:account.id,blogId,category,jobId,status:'generation_pending',checkpoint}});
+          writeSettings(runtimeRoot,{pendingGenerationDraft:{accountId:account.id,blogId,category,jobId,retryRootId:prior?.retryRootId || prior?.jobId || jobId,status:'generation_pending',checkpoint}});
           fs.writeFileSync(path.join(jobDir,'generation-checkpoint.json'),JSON.stringify(checkpoint,null,2));
         },
         onModelError: payload=>awaitModelRetry(jobId,payload),
@@ -1090,6 +1053,7 @@ async function startJob(form) {
         recommendedKeywordLanes: keywordLanePlan.recommended,
         agentModels,
         historyTitles: titleHistory.map((item) => item.title),
+        publishedTopics: publishedTopicHistory,
         accountImageStyle: {
           accountId: account.id || "",
           sampleImagePath: account.sampleImagePath || "",
@@ -1309,7 +1273,7 @@ async function startJob(form) {
         images: [],
         imageNotes: [],
         tokenUsage: jobTokenUsage,
-        history: readHistory(runtimeRoot)
+        history: historyForUi(runtimeRoot)
       });
       return { status: "duplicate_retry", keywordLane: keywordLaneResultPayload(latestLaneResult) };
     }
@@ -1364,8 +1328,8 @@ async function startJob(form) {
 
     if (shouldPublish && codexResult.publishable !== false && !agentResult.imageWarnings?.length) {
       const durableDraft=buildPendingNaverPublishDraft({jobId,account,blogId,category,topic,keyword,agentResult,tags,publishPrivate,publishVisibility,publishScheduleMode,reserveAfterHours,breakSentencesInBody,publishToTistoryAfterNaver,tistoryBlogId,latestLaneResult,researchTitleResult,tokenUsage:jobTokenUsage});
-      writeSettings(runtimeRoot,{pendingNaverPublishDraft:durableDraft,pendingGenerationDraft:null});
-      fs.writeFileSync(path.join(jobDir,'publish-draft.json'),JSON.stringify(durableDraft,null,2));
+      savePublicationState(runtimeRoot,durableDraft,jobId);
+      writeSettings(runtimeRoot,{pendingGenerationDraft:null});
       updateStatus(jobId, "publishing", `Naver 블로그 ${publishVisibility === "public" ? "전체공개" : "비공개"} 발행 자동화`);
       await publishSavedDraft(runtimeRoot,durableDraft,jobId);
       publishReason=tistoryBlogId ? '네이버와 티스토리 발행 완료.' : '네이버 발행 완료.';
@@ -1393,6 +1357,8 @@ async function startJob(form) {
       final_verdict: "PASS",
       failure_phase: "",
       research_title: researchTitleResult.finalTitle || researchTitleResult.selectedTitle || "",
+      topic_thesis: researchTitleResult.topicThesis || '',
+      reader_question: researchTitleResult.writerContract?.contentStrategy?.primaryQuestion || '',
       topic_type: researchTitleResult.topicType || "",
       fact_based: researchTitleResult.factBased === true,
       source_summary: researchTitleResult.searchFlowSummary || "",
@@ -1422,7 +1388,7 @@ async function startJob(form) {
         imageNotes: agentResult.imageWarnings || [],
       tokenUsage: jobTokenUsage,
       tags,
-      history: readHistory(runtimeRoot)
+      history: historyForUi(runtimeRoot)
     });
     return { status: publishStatus, keywordLane: keywordLaneResultPayload(latestLaneResult) };
   } catch (error) {
@@ -1486,6 +1452,7 @@ async function startJob(form) {
       token_agents: jobTokenUsage.agents,
       attempts:error.attempts || generationAttempts,
       failure_phase: error.failurePhase || "",
+      failure_kind: error.failureKind || "execution",
       research_title: latestResearchTitleResult?.finalTitle || latestResearchTitleResult?.selectedTitle || "",
       reason: error.message
     });
@@ -1502,7 +1469,7 @@ async function startJob(form) {
       reason: error.message,
       tokenUsage: jobTokenUsage,
       tags: latestTagsForResume,
-      history: readHistory(runtimeRoot)
+      history: historyForUi(runtimeRoot)
     });
     return {
       status: failedStatus,
@@ -1537,15 +1504,17 @@ app.whenReady().then(async () => {
     return {
       runtimeRoot,
       codexCmdPath: resolveCodexCmdPath(settings.codexCmdPath),
+      codexInstallation: require('./lib/codexPlatform').detectCodexInstallation(settings.codexCmdPath),
       chrome: detectChromeInstall(),
       settings,
       accountStore: connectionStore(),
       bridgeError,
       pendingPreview:settings.pendingNaverPublishDraft ? {...settings.pendingNaverPublishDraft,images:getPreviewImages(settings.pendingNaverPublishDraft)} : null,
-      history: readHistory(runtimeRoot)
+      history: historyForUi(runtimeRoot)
     };
   });
 
+  ipcMain.handle('codex:models', () => require('./lib/codexModels').getCodexCatalog(readSettings(getRuntimeRoot()).codexCmdPath));
   ipcMain.handle("chrome:installAndQuit", async () => {
     await shell.openExternal("https://www.google.com/chrome/");
     setTimeout(() => app.quit(), 500);
@@ -1763,7 +1732,19 @@ app.whenReady().then(async () => {
     };
   });
   ipcMain.handle("tistory:testPublish", (_event, form) => startTistoryTestPublish(form));
-  ipcMain.handle("history:load", () => readHistory(getRuntimeRoot()));
+  ipcMain.handle("history:load", () => historyForUi(getRuntimeRoot()));
+  ipcMain.handle('history:retry', (_event, {id,form}) => {
+    if(pendingPublishBusy())throw new Error('진행 중인 작업을 마친 뒤 재시도하세요.');
+    const root=getRuntimeRoot(),settings=readSettings(root),history=readHistory(root),store=readAccountStore(root,settings);
+    const item=history.find(h=>h.id===id);if(!item)throw new Error('작업 이력을 찾을 수 없습니다.');
+    const plan=retryPlan(root,item,history,settings,store.accounts);
+    if(!plan.allowed)throw new Error(plan.reason);
+    const target={accountId:plan.accountId,blogId:plan.blogId,category:plan.category,jobId:plan.sourceId,retryRootId:plan.rootId};
+    writeSettings(root,plan.mode==='publish'
+      ? {pendingNaverPublishDraft:{...plan.draft,...target},pendingGenerationDraft:null}
+      : {pendingNaverPublishDraft:null,pendingGenerationDraft:{...target,status:'generation_pending',checkpoint:plan.checkpoint || null}});
+    return startJob({...form,accountId:plan.accountId,blogId:plan.blogId,category:plan.category});
+  });
   ipcMain.handle('job:pendingState',()=>pendingPublishState(getRuntimeRoot(),pendingPublishBusy()));
   ipcMain.handle('job:cancelPending',()=>cancelPendingPublish(getRuntimeRoot(),pendingPublishBusy()));
   ipcMain.handle("job:start", (_event, form) => startJob(form));
@@ -1774,7 +1755,6 @@ app.whenReady().then(async () => {
     const pending=modelRetryPending;modelRetryPending=null;
     pending.resolve({action:choice.action,model:choice.model});return true;
   });
-  ipcMain.handle("runtime:open", () => shell.openPath(getRuntimeRoot()));
   ipcMain.handle("file:open", (_event, filePath) => {
     if (!filePath) return false;
     const runtimeRoot = path.resolve(getRuntimeRoot());
@@ -1827,6 +1807,5 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
-  activeNaverSessions.clear();
   getBridge().stop();
 });

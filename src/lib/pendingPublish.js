@@ -22,4 +22,12 @@ function cancelPendingPublish(root,busy=false){
   writeSettings(root,{pendingNaverPublishDraft:null,pendingGenerationDraft:null});
   return {cancelled:true,...pendingPublishState(root)};
 }
-module.exports={pendingPublishState,cancelPendingPublish};
+function savePublicationState(root,value,jobId){
+ value={...value,retryRootId:value.retryRootId || require('./historyRetry').readJob(root,jobId,'retry-context.json')?.retry_root_id || jobId};
+ writeSettings(root,{pendingNaverPublishDraft:value});
+ for(const id of new Set([jobId,value.jobId])){
+  const file=require('./historyRetry').jobFile(root,id,'publish-draft.json');
+  if(file){fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,JSON.stringify(value,null,2));}
+ }
+}
+module.exports={pendingPublishState,cancelPendingPublish,savePublicationState};

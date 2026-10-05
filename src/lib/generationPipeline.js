@@ -63,6 +63,7 @@ async function generateAttempt(options, log, deps) {
   progress('주제 조사 1차 시작','info','research');
   research=await run('research',deps.researchPrompt(effective),'research-title-prompt.txt','research-title-result.json');
   options.onResearchTitle?.(research);
+  if(research.novelty?.duplicate===true)return {...failed('title_duplicate',research.novelty.reason || '최근 발행 글과 소재가 중복됩니다.'),status:'duplicate_retry',title:research.finalTitle || ''};
   let issue=evidenceIssue(research,effective.searchResults,effective);
   for(let round=1;round<=2 && (research.status==='REVISION' || (research.status==='PASS' && issue));round++){
     if(typeof options.onSearchNeeded!=='function' || research.searchNeed==='skip')break;
@@ -78,9 +79,14 @@ async function generateAttempt(options, log, deps) {
     progress(`주제 조사 ${round+1}차 · 보강 자료 검토 시작`,'info','research');
     research=await run('research',deps.researchRetry(effective,research),`research-title-search-${round}.txt`,'research-title-result.json');
     options.onResearchTitle?.(research);issue=evidenceIssue(research,sources,effective);
+    if(research.novelty?.duplicate===true)return {...failed('title_duplicate',research.novelty.reason || '최근 발행 글과 소재가 중복됩니다.'),status:'duplicate_retry',title:research.finalTitle || ''};
   }
   if(research.status!=='PASS' || issue)return failed('research',[research.failureReason,issue].filter(Boolean).filter((s,i,a)=>a.indexOf(s)===i).join('\n') || '핵심 주장의 근거를 확보하지 못했습니다.');
   finalTitle=normalizeTitle(research.finalTitle);if(!finalTitle)return failed('research','최종 제목이 없습니다.');
+  if((options.publishedTopics || []).length){
+    if(research.novelty?.duplicate===true)return {...failed('title_duplicate',research.novelty.reason || '최근 발행 글과 소재가 중복됩니다.'),status:'duplicate_retry',title:finalTitle};
+    if(research.novelty?.duplicate!==false || !String(research.novelty.reason || '').trim())return failed('research','최근 발행 글과의 소재 중복 판단이 누락됐습니다. 본문 생성을 중지했습니다.');
+  }
   const duplicate=await options.onFinalTitleCandidate?.(finalTitle,research);
   if(duplicate?.duplicate)return {...failed('title_duplicate',duplicate.reason || '동일한 제목이 있습니다.'),status:'duplicate_retry',title:finalTitle};
   progress('주제 선정 통과 · 본문 작성으로 이동','info','research');
@@ -154,7 +160,13 @@ async function generateAttempt(options, log, deps) {
         const generated=await run('image',deps.imagePrompt({...effective,researchTitleResult:research,articleOpening:String(writer.article || '').slice(0,900),includeTitleImage:images?Boolean(request.titleImagePrompt):effective.includeTitleImage!==false,writerResult:request,finalTitle,imageRevisionFeedback:issue}),`image-worker-${attempt}.txt`,'image-worker-result.json');
         images=deps.mergeImages(images,usableImages(generated,options.jobDir));savedImages=images;await checkpoint();issue=deps.imageIssue(images,writer,effective);if(!issue){progress('이미지 생성 및 확인 완료');break;}
         progress(`이미지 ${attempt}차 확인: ${issue}`,'warn');
-      }catch(error){issue=error.message;progress(`이미지 ${attempt}차 생성 실패: ${issue}`,'warn');if(error.code==='CODEX_USAGE_LIMIT')break;}
+      }catch(error){
+        // Execution failures already pass through the user-controlled model retry.
+        // Do not retry again here: the user may have cancelled, or images may
+        // have been generated before the response was lost. Only a returned
+        // image verification failure permits the targeted correction above.
+        issue=error.message;progress(`이미지 ${attempt}차 생성 실패: ${issue}`,'warn');break;
+      }
     }
     result=deps.applyImages(result,images || {},effective);
     if(issue){result.publishable=false;result.notes=[...(result.notes || []),`본문은 보존했습니다. 이미지 확인 후 발행하세요: ${issue}`];log(result.notes.at(-1),'warn','image');}
@@ -235,6 +247,10 @@ async function generate(options,log,deps) {
     if(u.rateLimits)totals.rateLimits=u.rateLimits;
     Object.assign(entry,{status:result.status,phase:result.failurePhase || '',verdict:result.researchTitleResult?.status || '',reason:result.failureReason || '',title:result.researchTitleResult?.finalTitle || result.title,tokenUsage:u,finishedAt:new Date().toISOString()});persist();
     if(result.status==='success')break;
+    if(result.status==='duplicate_retry'){
+      log('기존 발행 소재와 중복되어 검색·본문·이미지 생성을 더 진행하지 않습니다.','warn','main');
+      break;
+    }
     if(result.failureKind==='execution'){
       // A returned but invalid response is not a completed step. Re-run only
       // that agent, retaining its preceding accepted results.
@@ -253,6 +269,6 @@ async function generate(options,log,deps) {
     // Execution/quota errors throw; a preserved draft with incomplete images returns success.
   }
   totals.estimatedPromptTokens=Math.ceil(totals.promptCharacters/3);
-  return {...result,attempts,tokenUsage:totals,failureReason:result.status==='success'?result.failureReason:`${result.contentRevisionStopped?'본문 보완 중단':result.retrievalStopped?'검색 근거 확보 중단':`전체 ${attempts.length}회 시도 소진`} · ${result.failureReason || '생성 실패'}`};
+  return {...result,attempts,tokenUsage:totals,failureReason:result.status==='success'?result.failureReason:`${result.status==='duplicate_retry'?'중복 소재 제외':result.contentRevisionStopped?'본문 보완 중단':result.retrievalStopped?'검색 근거 확보 중단':`전체 ${attempts.length}회 시도 소진`} · ${result.failureReason || '생성 실패'}`};
 }
 module.exports={generate,evidenceIssue};

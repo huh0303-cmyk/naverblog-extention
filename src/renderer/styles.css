@@ -47,7 +47,7 @@
 button.ghost,button.small,button.select-button{height:32px;min-height:32px;padding:0 12px;font-size:12px;font-weight:550;display:inline-flex;align-items:center;justify-content:center;line-height:1.2;border-radius:7px}
 button.ghost,:root[data-theme="light"] button.ghost{background:var(--button);border-color:var(--button-border);color:var(--button-text)}
 button.ghost:hover,:root[data-theme="light"] button.ghost:hover{background:#3b678d;border-color:#7398ba}
-.header-actions>button{width:96px;flex:none}.header-actions #extensionSetup{width:112px}
+.header-actions>button{flex:none}
 .header-actions .badge{height:26px;display:inline-flex;align-items:center;border:1px solid var(--border)}
 .workspace{grid-template-columns:350px minmax(0,1fr);gap:16px;margin-top:16px}
 .panel{padding:18px;border-radius:12px;box-shadow:0 3px 12px #00000008}
@@ -101,10 +101,8 @@ button.primary,:root[data-theme="light"] button.primary,
 }
 button.primary:hover,:root[data-theme="light"] button.primary:hover,
 .account-actions button[data-action="open"]:hover,:root[data-theme="light"] .account-actions button[data-action="open"]:hover{background:var(--primary-dark);border-color:var(--primary-dark)}
-.ghost.extension-connect,:root[data-theme="light"] .ghost.extension-connect,
-#extensionSetup{background:var(--connect-bg);border-color:var(--connect-border);color:var(--connect-text)}
-.ghost.extension-connect:hover,:root[data-theme="light"] .ghost.extension-connect:hover,
-#extensionSetup:hover{background:color-mix(in srgb,var(--connect-border) 20%,var(--connect-bg));border-color:var(--connect-border)}
+.ghost.extension-connect,:root[data-theme="light"] .ghost.extension-connect{background:var(--connect-bg);border-color:var(--connect-border);color:var(--connect-text)}
+.ghost.extension-connect:hover,:root[data-theme="light"] .ghost.extension-connect:hover{background:color-mix(in srgb,var(--connect-border) 20%,var(--connect-bg));border-color:var(--connect-border)}
 .ghost.danger-button,:root[data-theme="light"] .ghost.danger-button{background:var(--delete-bg);border-color:var(--delete-border);color:var(--delete-text)}
 .ghost.danger-button:hover,:root[data-theme="light"] .ghost.danger-button:hover{background:color-mix(in srgb,var(--delete-border) 20%,var(--delete-bg));border-color:var(--delete-border)}
 .selected-title span,.pairing-code{color:var(--accent-text)}
@@ -155,3 +153,42 @@ button{transition:background-color .15s,border-color .15s,color .15s}
 #tistoryConnectionPanel{padding-bottom:0;border-bottom:0}
 
 .target-progress{margin-bottom:16px;border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--bg)}.target-progress-head{display:flex;justify-content:space-between;gap:12px;padding:10px 12px;background:var(--surface-muted)}.target-progress-row{display:grid;grid-template-columns:minmax(90px,1fr) minmax(140px,2fr) 110px;gap:8px;align-items:center;padding:8px 12px;border-top:1px solid var(--border)}.target-progress-row>span{overflow-wrap:anywhere}.target-progress-row>.badge{justify-content:center}.target-progress-row small{grid-column:1/-1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.target-progress-row small:empty{display:none}
+/* Compact header controls; status takes the remaining space at the right edge. */
+.topbar{grid-template-columns:auto minmax(0,1fr)}
+.agent-model-toolbar{grid-template-columns:140px repeat(4,88px)}
+.header-actions{width:100%;display:flex;flex-wrap:nowrap;gap:8px;align-items:center}
+.header-actions .badge{flex:none;white-space:nowrap}
+.header-actions #runState{flex:1;max-width:none;min-width:70px;white-space:normal;height:auto;min-height:26px;justify-content:center;overflow-wrap:anywhere}
+.header-actions .theme-toggle{width:26px;height:26px;min-height:26px;padding:4px;display:inline-flex;align-items:center;justify-content:center;border-radius:6px}
+.theme-toggle svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+@media(max-width:1199px){.topbar{grid-template-columns:1fr}.header-actions{grid-column:1;grid-row:1}.agent-model-toolbar{grid-column:1;grid-row:2}}
+@media(max-width:760px){.agent-model-toolbar{grid-template-columns:repeat(5,minmax(0,1fr))}}
+/* Keep the compact badge group anchored to the right of the header. */
+.topbar{grid-template-columns:auto auto;justify-content:space-between}
+.header-actions{width:auto;justify-self:end}
+.header-actions #runState{flex:none;width:220px;max-width:220px}
+:root[data-theme="light"]{--button:#e6efff;--button-border:#a9c2e7;--button-text:#234f88;--button-hover:#d6e6ff}
+:root[data-theme="light"] button.ghost:disabled{background:#f1f3f5;border-color:#dce1e6;color:#9ba5ae;opacity:.7}
+.history-modal{width:min(1050px,100%)}
+.history-modal-body{padding:2px 2px 12px}#historyBody{display:grid;gap:16px}
+.history-card{border:1px solid var(--border);border-left:4px solid var(--info);border-radius:12px;padding:16px 18px;background:var(--surface-muted);box-shadow:0 2px 8px #0000000a;min-width:0}
+.history-card.success{border-left-color:var(--primary)}
+.history-card.danger{border-left-color:var(--danger)}
+.history-card-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap;border-bottom:1px solid var(--border);padding-bottom:10px}
+.history-date{font-size:11px;color:var(--muted)}.history-token{font-size:10px;color:var(--muted)}
+.history-card h3{font-size:15px;line-height:1.6;margin:12px 0 8px;overflow-wrap:anywhere}
+.history-card .history-meta{font-size:12px;color:var(--muted);margin:0 0 8px}
+.history-card .history-reason{font-size:12px;margin:0;line-height:1.7;overflow-wrap:anywhere;white-space:pre-wrap}
+.history-retry-note{font-size:11px;color:var(--muted);margin-top:8px}
+.history-retry{margin-left:auto;min-width:94px;height:32px;border:1px solid #03c75a;border-radius:7px;background:#03c75a;color:#063b1c;font-weight:700;font-size:12px;padding:0 12px}
+.history-retry:hover:not(:disabled){background:#24dc77}
+.history-retry:disabled{background:var(--surface);border-color:var(--border);color:var(--muted);opacity:.65}
+.history-details{margin-top:12px;border-top:1px solid var(--border);padding-top:10px}
+.history-details summary{cursor:pointer;color:var(--info);font-size:12px;font-weight:600}
+.history-details dl{margin:12px 0 0}.history-details dl>div{display:grid;grid-template-columns:110px minmax(0,1fr);gap:12px;padding:8px 0;border-bottom:1px solid var(--border)}
+.history-details dt{color:var(--muted);font-size:11px}.history-details dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}
+:root[data-theme="light"] .history-card{background:#f5f8ff;border-color:#c2d2e9;border-left-color:#7ba3d5}
+:root[data-theme="light"] .history-card.success{border-left-color:#03b653}
+:root[data-theme="light"] .history-card.danger{border-left-color:#e76a75;background:#fff7f7}
+@media(max-width:1199px){.topbar{grid-template-columns:1fr}.header-actions{grid-column:1;grid-row:1}.agent-model-toolbar{grid-column:1;grid-row:2}}
+@media(max-width:760px){.header-actions{flex-wrap:wrap}.header-actions #runState{width:180px}.history-details dl>div{grid-template-columns:1fr;gap:4px}}

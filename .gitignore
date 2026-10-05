@@ -67,3 +67,8 @@ scripts/*
 runtime-template/
 packages/blog-humanizer/README.md
 packages/blog-humanizer/SKILL.md
+
+# Keep only the root README as Markdown documentation
+*.md
+!/README.md
+!packages/blog-humanizer/references/*.md

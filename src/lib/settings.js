@@ -1,28 +1,18 @@
 const fs = require("node:fs");
-const os = require("node:os");
+const { defaultCodexCommand, isDefaultCodexCommand, resolveCodexCmdPath } = require("./codexPlatform");
 const path = require("node:path");
 
 const LEGACY_NAVER_SEARCH_URL = "https://search.naver.com/search.naver?where=web&query={query}";
 const DEFAULT_NAVER_SEARCH_URL = "https://search.naver.com/search.naver?ssc=tab.blog.all&sm=tab_jum&query={query}";
 const DEFAULT_IMAGE_ASPECT_RATIO = "16:9";
 const IMAGE_ASPECT_RATIOS = new Set([DEFAULT_IMAGE_ASPECT_RATIO, "9:16", "1:1", "3:4"]);
-const CODEX_MODEL_IDS = new Set([
-  "",
-  "gpt-5.6-sol",
-  "gpt-5.6-terra",
-  "gpt-5.6-luna",
-  "gpt-5.5",
-  "gpt-5.4",
-  "gpt-5.4-mini",
-  "gpt-5.3-codex"
-]);
 
 const DEFAULT_SETTINGS = {
   blogId: "",
   topic: "",
   keyword: "",
   category: "",
-  codexCmdPath: "codex.cmd",
+  codexCmdPath: defaultCodexCommand(),
   codexModel: "",
   primarySearchProvider: "naver",
   fallbackSearchProvider: "google",
@@ -85,6 +75,7 @@ function normalizeSettings(settings) {
   normalized.bodyImageAspectRatio = normalizeImageAspectRatio(normalized.bodyImageAspectRatio || normalized.imageAspectRatio);
   normalized.maxBodyImages = normalizeMaxBodyImages(normalized.maxBodyImages);
   normalized.codexModel = normalizeCodexModel(normalized.codexModel);
+  if (isDefaultCodexCommand(normalized.codexCmdPath)) normalized.codexCmdPath = defaultCodexCommand();
   return normalized;
 }
 
@@ -93,56 +84,9 @@ function normalizeMaxBodyImages(value) {
   return Number(value) > 0 ? 10 : 0;
 }
 
-function isDefaultCodexCmdPath(value) {
-  const normalized = String(value || "").trim().toLowerCase();
-  return !normalized || normalized === "codex" || normalized === "codex.cmd" || normalized === "codex.exe";
-}
-
-function findDesktopCodexExecutable() {
-  const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
-  const codexBinRoot = path.join(localAppData, "OpenAI", "Codex", "bin");
-  if (!fs.existsSync(codexBinRoot)) return "";
-
-  const candidates = [];
-  try {
-    for (const entry of fs.readdirSync(codexBinRoot, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      const candidate = path.join(codexBinRoot, entry.name, "codex.exe");
-      if (fs.existsSync(candidate)) candidates.push(candidate);
-    }
-  } catch {
-    return "";
-  }
-
-  const rootCandidate = path.join(codexBinRoot, "codex.exe");
-  if (fs.existsSync(rootCandidate)) candidates.push(rootCandidate);
-
-  return candidates
-    .map((candidate) => {
-      try {
-        return { candidate, mtimeMs: fs.statSync(candidate).mtimeMs };
-      } catch {
-        return { candidate, mtimeMs: 0 };
-      }
-    })
-    .sort((a, b) => b.mtimeMs - a.mtimeMs)[0]?.candidate || "";
-}
-
-function resolveCodexCmdPath(value) {
-  const raw = String(value || "").trim();
-  if (!isDefaultCodexCmdPath(raw)) {
-    // Desktop updates replace their versioned bin directory. Preserve custom CLI paths.
-    const root = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "OpenAI", "Codex", "bin");
-    const relative = path.relative(root, raw);
-    if (!fs.existsSync(raw) && relative && !relative.startsWith('..') && !path.isAbsolute(relative) && path.basename(raw).toLowerCase()==='codex.exe') return findDesktopCodexExecutable() || raw;
-    return raw;
-  }
-  return findDesktopCodexExecutable() || raw || DEFAULT_SETTINGS.codexCmdPath;
-}
-
 function normalizeCodexModel(value) {
-  const normalized = String(value || "").trim().toLowerCase();
-  return CODEX_MODEL_IDS.has(normalized) ? normalized : "";
+  const normalized = String(value || "").trim();
+  return /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,199}$/.test(normalized) ? normalized : "";
 }
 
 function normalizeImageAspectRatio(value) {

@@ -2,7 +2,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 const { spawn } = require("node:child_process");
-const { normalizeMaxBodyImages } = require("./settings");
+const { normalizeMaxBodyImages, normalizeCodexModel } = require("./settings");
+const { buildCodexEnvironment } = require("./codexPlatform");
 
 const DEFAULT_AGENT_MODELS = {
   main: "high",
@@ -12,16 +13,6 @@ const DEFAULT_AGENT_MODELS = {
   imageStyle: "medium"
 };
 const VALID_AGENT_MODEL_EFFORTS = new Set(["low", "medium", "high", "xhigh"]);
-const CODEX_MODEL_IDS = new Set([
-  "",
-  "gpt-5.6-sol",
-  "gpt-5.6-terra",
-  "gpt-5.6-luna",
-  "gpt-5.5",
-  "gpt-5.4",
-  "gpt-5.4-mini",
-  "gpt-5.3-codex"
-]);
 const DEFAULT_IMAGE_ASPECT_RATIO = "16:9";
 const IMAGE_ASPECT_RATIOS = new Set([DEFAULT_IMAGE_ASPECT_RATIO, "9:16", "1:1", "3:4"]);
 const CODEX_USAGE_LIMIT_TYPES = new Set([
@@ -46,11 +37,6 @@ function normalizeAgentModels(models = {}) {
 function modelEffortForAgent(options, agent) {
   if (agent === 'humanizer') return normalizeAgentModels(options.agentModels).writer;
   return normalizeAgentModels(options.agentModels)[agent] || DEFAULT_AGENT_MODELS[agent] || "high";
-}
-
-function normalizeCodexModel(value) {
-  const normalized = String(value || "").trim().toLowerCase();
-  return CODEX_MODEL_IDS.has(normalized) ? normalized : "";
 }
 
 function normalizeImageAspectRatio(value) {
@@ -394,7 +380,6 @@ function readLatestCodexTokenUsageFromSessions({
   const expectedResultPath = resultFileName && jobDir
     ? normalizePathForSearch(path.join(jobDir, resultFileName))
     : "";
-  const expectedFileName = normalizePathForSearch(resultFileName);
   const files = listRecentSessionFiles(codexSessionsRoot(), 120);
   for (const filePath of files) {
     try {
@@ -824,7 +809,7 @@ function buildImageWorkerPrompt({
     bodyImageLimit > 0 ? "- Body images are section-compression visuals, not generic decoration and not title cards. Avoid readable Korean paragraphs, long labels, UI copy, and text-heavy charts." : "- Body image generation is disabled.",
     bodyImageLimit > 0 ? `- Every body image must use aspect ratio ${selectedBodyImageAspectRatio}.` : "",
     bodyImageLimit > 0 ? "- For every supplied item, preserve sequence and sectionHeading and compress the entire section's concrete subject, relationship, process, comparison, timeline, or decision cue into one coherent image." : "",
-    bodyImageLimit > 0 ? "- Inspect each generated body image before accepting it. If it is generic, loosely related, or misses the section's central structure, regenerate it once before returning a path." : "",
+    bodyImageLimit > 0 ? "- Inspect each generated body image before accepting it. If it is generic, loosely related, or misses the section's central structure, report that image as failed with the specific reason. Do not regenerate within this task; the app permits one targeted retry." : "",
     "",
     "Writer Agent image handoff:",
     JSON.stringify({
@@ -1097,7 +1082,7 @@ function writerOutputIssueReason(writerResult, options={}) {
   if (!String(writerResult?.article || "").trim()) {
     return "Writer Agent가 본문(article)을 비워 반환했습니다.";
   }
-  const {cleanSourceUrl,referenceParts}=require('./publicationFormat');
+  const {cleanSourceUrl,referenceParts,isBlogCitation}=require('./publicationFormat');
   const parts=referenceParts(writerResult.article);
   if(/\[(?:(?:참고|출처)\s*)?\d{1,3}(?:\s*[,–-]\s*\d{1,3})*\]/.test(parts.body))return '본문에는 참고 번호를 넣지 마세요. 출처는 맨 아래 [SECTION - 참고자료]에만 모으세요.';
   if(parts.count>1 || (parts.count && /^\[SECTION\s*-/m.test(parts.references)))return '참고자료는 글 맨 아래 한 번만 배치하세요.';
@@ -1109,7 +1094,7 @@ function writerOutputIssueReason(writerResult, options={}) {
     for(const citation of citations){
       const source=sources.get(citation.sourceId);
       if(!source || ![source.url,source.fetchedUrl].filter(Boolean).map(cleanSourceUrl).includes(cleanSourceUrl(citation.url)))return '본문 출처가 전달한 원문과 일치하지 않습니다. 제공된 sourceId와 URL을 사용하세요.';
-      if(!parts.references.includes(cleanSourceUrl(citation.url)))return '참고자료 URL이 본문에 표시되지 않았습니다. 맨 아래 [SECTION - 참고자료]에 실제 사용한 원문 링크를 모으세요.';
+      if(!isBlogCitation(citation) && !parts.references.includes(cleanSourceUrl(citation.url)))return '참고자료 URL이 본문에 표시되지 않았습니다. 맨 아래 [SECTION - 참고자료]에 실제 사용한 원문 링크를 모으세요.';
     }
   }
   return "";
@@ -1378,6 +1363,7 @@ async function runCodexTask({
     ];
     const child = spawn(options.codexCmdPath, args, {
       cwd: options.jobDir,
+      env: buildCodexEnvironment({ command: options.codexCmdPath }),
       windowsHide: true,
       shell: shouldRunCodexViaShell(options.codexCmdPath)
     });
@@ -1440,14 +1426,14 @@ async function runCodexTask({
     child.stderr.on("data", (chunk) => handleChunk(chunk, "warn"));
     child.stdin.end(prompt);
     child.on("error", (error) => settle(createCodexExecutionError(
-      `codex.cmd 실행 실패: ${error.message}`,
+      `Codex 실행 실패: ${error.message}`,
       { model: codexModel, detail: diagnosticLines.join("\n") }
     )));
     child.on("close", (code) => {
       flushStreamBuffers();
       if (code === 0) settle();
       else settle(createCodexExecutionError(
-        `codex.cmd가 종료 코드 ${code}로 실패했습니다.`,
+        `Codex가 종료 코드 ${code}로 실패했습니다.`,
         { model: codexModel, detail: diagnosticLines.join("\n") }
       ));
     });

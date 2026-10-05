@@ -47,8 +47,9 @@ function matchingWriterPrefix(snapshot,steps) {
   }
   return -1;
 }
-async function runWriter({steps,read,apply,save,checkCancelled,onProgress}) {
+async function runWriter({steps,read,apply,save,checkCancelled,onProgress,requireEmpty=false}) {
   let snapshot=await read(),cursor=matchingWriterPrefix(snapshot,steps);
+  if(requireEmpty && (writerNormalize(snapshot.title) || withoutGeneratedPreviews(snapshot.blocks).length))throw new Error('새 글쓰기 화면이 비어 있지 않습니다. 다시 시작하면 글쓰기 화면을 새로 열고 저장된 원고를 처음부터 입력합니다.');
   if(cursor<0)throw new Error('현재 글이 저장 원고의 입력 순서와 다릅니다. 기존 글을 보존하고 입력을 중지했습니다.');
   await save({cursor,anchorId:snapshot.blocks.at(-1)?.id || '',snapshot});
   while(cursor<steps.length){

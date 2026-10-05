@@ -46,7 +46,8 @@ function readHistory(runtimeRoot) {
 
 function appendHistory(runtimeRoot, entry) {
   const historyPath = getHistoryPath(runtimeRoot);
-  const safeEntry = { ...entry };
+  const context = require('./historyRetry').readJob(runtimeRoot, entry.id, 'retry-context.json') || {};
+  const safeEntry = { ...entry, ...context };
   delete safeEntry.naverPassword;
   delete safeEntry.password;
   fs.appendFileSync(historyPath, `${JSON.stringify(safeEntry)}\n`, "utf8");

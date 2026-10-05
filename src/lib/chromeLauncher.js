@@ -5,8 +5,9 @@ const crypto = require('node:crypto');
 const { spawn } = require('node:child_process');
 
 function findChrome(platform = process.platform, env = process.env, exists = fs.existsSync) {
+  if (!['win32', 'darwin'].includes(platform)) return '';
   const candidates = platform === 'darwin'
-    ? ['/Applications/Google Chrome.app', path.join(os.homedir(), 'Applications', 'Google Chrome.app')]
+    ? ['/Applications/Google Chrome.app', path.posix.join(env.HOME || os.homedir(), 'Applications', 'Google Chrome.app')]
     : [env.PROGRAMFILES, env['PROGRAMFILES(X86)'], env.LOCALAPPDATA].filter(Boolean)
       .map(root => path.join(root, 'Google', 'Chrome', 'Application', 'chrome.exe'));
   return candidates.find(exists) || '';
@@ -27,10 +28,10 @@ function launchSpec(root, account, platform = process.platform, chrome = findChr
 async function openAccountChrome(root, account, shell, options = {}) {
   const spec = launchSpec(root, account, options.platform, options.chrome);
   if(spec.dataDir)fs.mkdirSync(spec.dataDir, { recursive: true });
-  const shortcuts = path.join(root, 'chrome-shortcuts');
-  fs.mkdirSync(shortcuts, { recursive: true });
   const label = String(account.label || account.blogId).replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 60);
   if (spec.platform === 'win32') {
+    const shortcuts = path.join(root, 'chrome-shortcuts');
+    fs.mkdirSync(shortcuts, { recursive: true });
     const shortcut = path.join(shortcuts, `${label}-${spec.key.slice(0, 6)}.lnk`);
     const ok = shell.writeShortcutLink(shortcut, 'create', {
       target: spec.chrome, args: spec.args.map(arg => `"${arg}"`).join(' '),
@@ -42,9 +43,13 @@ async function openAccountChrome(root, account, shell, options = {}) {
     return { ...spec, shortcut };
   }
   if (spec.platform === 'darwin') {
-    // LaunchServices opens the installed browser. No browser control channel is created.
+    // Start with explicit launch arguments for both platforms. A bare `open -a`
+    // URL can target an isolated Naver instance with the same bundle ID.
+    // Chrome's profile singleton forwards to the matching running instance:
+    // Naver uses its data directory; Tistory uses Chrome's default directory.
+    const args = ['-n', '-a', spec.chrome, '--args', ...spec.args];
     await new Promise((resolve, reject) => {
-      const child = spawn('/usr/bin/open', ['-na', spec.chrome, '--args', ...spec.args], { stdio: 'ignore', windowsHide: true });
+      const child = (options.spawn || spawn)('/usr/bin/open', args, { stdio: 'ignore', windowsHide: true });
       child.once('error', reject); child.once('exit', code => code === 0 ? resolve() : reject(new Error('Chrome을 열지 못했습니다.')));
     });
     return spec;
