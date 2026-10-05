@@ -1,6 +1,6 @@
 {
   "name": "naverblog-extention",
-  "version": "0.2.5-rc.1",
+  "version": "0.2.5-rc.2",
   "description": "네이버 계정별 일반 Chrome 창과 확장프로그램으로 연결하는 글쓰기 앱",
   "main": "src/main.js",
   "scripts": {

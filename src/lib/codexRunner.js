@@ -798,7 +798,7 @@ function buildImageWorkerPrompt({
     accountImageStylePrompt ? accountImageStylePrompt : "",
     "",
     "Title image policy:",
-    includeTitleImage ? "- The title image is a mobile-feed editorial thumbnail: communicate the same subject and supported reader promise as the title and opening, using one clear focal point. Do not compress every section into a dense infographic." : "- Title image generation is disabled.",
+    includeTitleImage ? "- The title image is a mobile-feed editorial thumbnail: visually synthesize the title AND the whole article’s core message and supported reader promise, using one clear focal point. Do not compress every section into a dense infographic." : "- Title image generation is disabled.",
     includeTitleImage ? `- The title image must use aspect ratio ${selectedTitleImageAspectRatio}.` : "",
     includeTitleImage ? "- Visible Korean text is mandatory. Render every supplied titleImageText string verbatim, large, readable, accurate, and integrated into a clear headline/key-fact hierarchy." : "",
     includeTitleImage ? "- Do not add long Korean paragraphs, fake official marks, unverified amounts, unverified dates, or labels that are not supported by the article." : "",
@@ -815,7 +815,7 @@ function buildImageWorkerPrompt({
     JSON.stringify({
       readerPromise: researchTitleResult?.writerContract?.readerPromise || "",
       contentStrategy: researchTitleResult?.writerContract?.contentStrategy || null,
-      articleOpening,
+      articleContext: require('./publicationFormat').referenceParts(writerResult?.article || articleOpening).body,
       titleImagePrompt: writerResult?.titleImagePrompt || "",
       titleImageText: Array.isArray(writerResult?.titleImageText) ? writerResult.titleImageText : [],
       bodyImages: Array.isArray(writerResult?.bodyImages) ? writerResult.bodyImages.slice(0, bodyImageLimit) : []
@@ -907,6 +907,7 @@ function pendingImageWriterResult(writerResult, imageResult, options = {}) {
     });
   return {
     title: writerResult?.title || "",
+    article: writerResult?.article || "",
     titleImagePrompt: titlePending ? writerResult?.titleImagePrompt || "" : "",
     titleImageText: titlePending && Array.isArray(writerResult?.titleImageText) ? writerResult.titleImageText : [],
     bodyImages: pendingBodyImages
@@ -1097,7 +1098,7 @@ function writerOutputIssueReason(writerResult, options={}) {
       if(!isBlogCitation(citation) && !parts.references.includes(cleanSourceUrl(citation.url)))return '참고자료 URL이 본문에 표시되지 않았습니다. 맨 아래 [SECTION - 참고자료]에 실제 사용한 원문 링크를 모으세요.';
     }
   }
-  return "";
+  return require('./articleRequirements').articleLengthIssue(writerResult);
 }
 
 function articleSections(article) {
@@ -1122,6 +1123,19 @@ function writerImageContractIssueReason(writerResult, options = {}) {
   const sequences=images.map(i=>Number(i.sequence));
   if(new Set(sequences).size!==sequences.length || new Set(markers).size!==markers.length || markers.length!==images.length)return '이미지 번호가 중복되었거나 본문 마커와 일치하지 않습니다.';
   if(images.some(i=>!Number.isInteger(Number(i.sequence)) || Number(i.sequence)<1 || !markers.includes(Number(i.sequence)) || !String(i.prompt || '').trim()))return '이미지 번호, 본문 위치 또는 설명을 확인해 주세요.';
+  const sections=articleSections(writerResult?.article);
+  const bodySections=sections.filter(s=>s.heading!=='참고자료');
+  for(const image of images){
+    const section=bodySections.find(s=>normalizedSectionHeading(s.heading)===normalizedSectionHeading(image.sectionHeading));
+    if(!section || !section.content.includes(`[IMAGE INSERT - ${image.sequence}]`))return '본문 이미지는 참고자료가 아닌 해당 소제목의 섹션에 배치해야 합니다.';
+  }
+  if(new Set(images.map(i=>normalizedSectionHeading(i.sectionHeading))).size!==images.length)return '같은 섹션의 중복 이미지 대신 다른 주요 섹션에 배치하세요.';
+  if(limit>0 && bodySections.length && !images.length)return '본문 주요 섹션을 함축하는 이미지를 최대한 배치하세요. 이미지 계획이 비어 있습니다.';
+  if(limit>0 && images.length<Math.min(limit,bodySections.length)){
+    const omissions=Array.isArray(writerResult?.imageOmissions)?writerResult.imageOmissions:[];
+    const missing=bodySections.filter(s=>!images.some(i=>normalizedSectionHeading(i.sectionHeading)===normalizedSectionHeading(s.heading)) && !omissions.some(o=>normalizedSectionHeading(o.sectionHeading)===normalizedSectionHeading(s.heading) && String(o.reason || '').trim()));
+    if(missing.length)return `참고자료를 제외한 섹션에 이미지를 최대한 배치하세요. 누락된 섹션: ${missing.map(s=>s.heading).join(', ')}. 생략이 필요하면 imageOmissions에 구체적인 이유를 적으세요.`;
+  }
   return '';
 }
 

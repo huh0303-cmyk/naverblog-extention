@@ -4,6 +4,7 @@ const fs=require('node:fs');
 const path=require('node:path');
 const {sourcesFor}=require('./generationPrompts');
 const {cleanPublicationUrls}=require('./publicationFormat');
+const {articleCharacterCount}=require('./articleRequirements');
 const {canonicalUrl}=require('./evidenceText');
 const {humanize,applyReview}=require('../../packages/blog-humanizer');
 const {resolveImageStyle}=require('./accountImageStyle');
@@ -56,6 +57,8 @@ async function generateAttempt(options, log, deps) {
   if(resume){
     if(resume.version!==1 || resume.review?.status!=='PASS' || !resume.writer?.article || !resume.title)throw new Error('저장된 이미지 재개 원고가 유효하지 않습니다. 기존 작업을 확인하세요.');
     research=resume.research;writer=resume.writer;review=resume.review;finalTitle=resume.title;
+    const resumedIssue=reasons([deps.writerIssue(writer,{...effective,researchTitleResult:research}),deps.imagePromptIssue(writer,effective)]);
+    if(resumedIssue)return failed('writer',resumedIssue);
     options.onResearchTitle?.(research);
     progress('승인된 본문 재사용 · 조사·본문 생성·윤문·검수를 건너뛰고 이미지 단계부터 재개합니다.');
   }else{
@@ -97,7 +100,8 @@ async function generateAttempt(options, log, deps) {
     progress(`본문 ${attempt}차 ${attempt===1?'작성':'보완'} 시작`,'info','writer');
     writer=await run('writer',attempt===1?deps.writerPrompt(params):deps.writerRetry(params,writer),attempt===1?'prompt.txt':'prompt-retry-2.txt','agent-result.json');
     writer=cleanPublicationUrls(writer);
-    const structural=deps.writerIssue(writer,params) || deps.imagePromptIssue(writer,effective);
+    progress(`본문 ${attempt}차 글자수: 공백 제외 ${articleCharacterCount(writer.article)}자 · 기준 1800~3000자`,'info','writer');
+    const structural=reasons([deps.writerIssue(writer,params),deps.imagePromptIssue(writer,effective)]);
     if(structural){progress(`본문 ${attempt}차 형식 확인 실패: ${structural}`,'warn','writer');if(attempt===1 && writer.failureCode!=='INSUFFICIENT_EVIDENCE'){feedback=structural;continue;}return failed('writer',structural);}
     progress(`본문 ${attempt}차 작성 완료 · 블로그 문장 다듬기 시작`,'info','writer');
     options.onArticleReady?.({...writer,previewStage:'humanizing',writerAttempt:attempt});
@@ -110,8 +114,12 @@ async function generateAttempt(options, log, deps) {
         complete:prompt=>run('humanizer',prompt+`\nOutput JSON file: ${path.join(effective.jobDir || '.',`humanizer-result-${attempt}.json`)}\nSave the JSON file, then print BLOGAUTO_RESULT_READY.`, `humanizer-prompt-${attempt}.txt`,`humanizer-result-${attempt}.json`)
       });
       writer={...writer,article:humanized.article};
-      const issue=deps.writerIssue(writer,params) || deps.imagePromptIssue(writer,effective);
-      if(issue)throw new Error(issue);
+      const issue=reasons([deps.writerIssue(writer,params),deps.imagePromptIssue(writer,effective)]);
+      if(issue){
+        progress(`윤문 후 본문 조건 보완 필요: ${issue}`,'warn','writer');
+        if(attempt===1){feedback=issue;continue;}
+        return failed('writer',issue);
+      }
     } catch(error) {
       writer=originalWriter;
       progress(`본문 문장 다듬기 중지 · 원본 보존: ${error.message}`,'warn','writer');
@@ -125,7 +133,7 @@ async function generateAttempt(options, log, deps) {
       writer={...writer,article:reviewed.article};
       if(reviewed.restoredIds.length)progress('메인 검증 · 불필요하거나 의미가 달라질 수 있는 윤문을 원문으로 복원했습니다.','info','writer');
     }catch(error){return failed('main_review',error.message,'execution');}
-    const reviewIssue=deps.reviewIssue(review);
+    const reviewIssue=reasons([deps.writerIssue(writer,params),deps.imagePromptIssue(writer,effective),deps.reviewIssue(review)]);
     if(review.status==='PASS' && !reviewIssue){progress(`본문 ${attempt}차 검수 통과`,'info','writer');break;}
     progress(`본문 ${attempt}차 검수 ${review.status==='BLOCK'?'중단':'반려'}: ${reasons([reviewIssue,review.failureReason,...(review.revisionInstructions || [])]) || '구체적인 수정 지침 없음'}${attempt===1 && review.status!=='BLOCK'?' · 본문 보완 준비':' · 작성 중지'}`,'warn','writer');
     if(attempt===2 || review.status==='BLOCK')return failed('main_review',reviewIssue || review.failureReason || '최종 검수에서 핵심 수정이 필요합니다.');
