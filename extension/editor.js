@@ -1,6 +1,6 @@
 // This function runs only inside the editor's isolated world. No debugger or remote control.
 async function editorCommand(command, args = {}) {
-  const build='20260928.6';let step='locate';
+  const build='20261007.2';let step='locate';
   try {
   const visible = el => Boolean(el && el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden');
   const find = selector => [...document.querySelectorAll(selector)].find(visible);

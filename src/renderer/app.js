@@ -117,6 +117,7 @@ function setRunState(status, detail = "") {
   const classMap = {
     success: "success",
     generated: "success",
+    draft_saved: "success",
     failed: "danger",
     codex_usage_limit: "danger",
     codex_exec_failed: "danger",
@@ -128,6 +129,7 @@ function setRunState(status, detail = "") {
   const labelMap = {
     success: "성공",
     generated: "생성",
+    draft_saved: "임시저장",
     failed: "실패",
     codex_usage_limit: "한도초과",
     codex_exec_failed: "Codex실패",
@@ -247,6 +249,7 @@ function statusBadge(status) {
   const classMap = {
     success: "success",
     generated: "success",
+    draft_saved: "success",
     failed: "danger",
     codex_usage_limit: "danger",
     codex_exec_failed: "danger",
@@ -258,6 +261,7 @@ function statusBadge(status) {
   const labelMap = {
     success: "성공",
     generated: "생성",
+    draft_saved: "임시저장",
     failed: "실패",
     codex_usage_limit: "한도초과",
     codex_exec_failed: "Codex실패",
@@ -461,7 +465,7 @@ function renderHistory(history) {
       ])
     ].filter(([, value]) => String(value || "").trim());
 
-    const retryLabel=['success','generated'].includes(item.status)?'완료':item.retry?.reason==='이후 재시도에서 완료된 작업'?'재시도 완료':item.retry?.allowed?'재시도':'재시도 불가';
+    const retryLabel=['success','generated','draft_saved'].includes(item.status)?'완료':item.retry?.reason==='이후 재시도에서 완료된 작업'?'재시도 완료':item.retry?.allowed?'재시도':'재시도 불가';
     card.innerHTML = `
       <div class="history-card-top">
         ${statusBadge(item.status)}
@@ -503,7 +507,7 @@ async function retryHistoryItem(item){
  addLog({agent:'main',message:'작업 이력 재시도 · '+item.retry.reason});
  try{
   const result=await window.blogAuto.retryHistory(item.id,collectForm({account,category}));
-  setTargetProgress(state.activeTarget,result?.status==='success'?'완료':'실패',result?.reason || '');
+  setTargetProgress(state.activeTarget,['success','draft_saved'].includes(result?.status)?'완료':'실패',result?.reason || '');
  }catch(error){setRunState('failed',error.message);setTargetProgress(state.activeTarget,'실패',error.message);addLog({agent:'main',level:'error',message:error.message});}
  finally{
   state.running=false;state.retryingHistory=false;$('#startButton').disabled=false;updateRunControls();
@@ -512,8 +516,8 @@ async function retryHistoryItem(item){
 }
 function renderHistorySummary(items) {
   const total = items.length;
-  const success = items.filter((item) => item.status === "success" || item.status === "generated").length;
-  const failed = items.filter((item) => !["success", "generated"].includes(String(item.status || ""))).length;
+  const success = items.filter((item) => item.status === "success" || item.status === "generated" || item.status === "draft_saved").length;
+  const failed = items.filter((item) => !["success", "generated", "draft_saved"].includes(String(item.status || ""))).length;
   const latest = items[0];
   const latestTitle = latest ? (latest.title || latest.research_title || latest.topic || "제목 없음") : "기록 없음";
   const latestDate = latest ? formatHistoryDate(latest.create_at) : "-";
@@ -540,7 +544,7 @@ function renderHistorySummary(items) {
 
 function historyStatusClass(status) {
   const normalized = String(status || "");
-  if (normalized === "success" || normalized === "generated") return "success";
+  if (normalized === "success" || normalized === "generated" || normalized === "draft_saved") return "success";
   if (normalized === "duplicate_retry") return "warning";
   if (normalized === "publishing" || normalized === "generating") return "info";
   return "danger";
@@ -640,6 +644,7 @@ function renderAccounts() {
   const manager = $("#accountManager");
   const toggle = $("#toggleAccountManagerButton");
   ensureSelectedAccount();
+  updateModeControls();
   if (manager && toggle) {
     manager.classList.toggle("collapsed", !state.accountManagerOpen);
     toggle.textContent = state.accountManagerOpen ? "접기" : "펼치기";
@@ -1083,7 +1088,8 @@ function collectForm(target = {}) {
     googleSearchUrl: DEFAULT_GOOGLE_SEARCH_URL,
     naverEditorDomNotes: "",
     publishAfterGenerate: true,
-    publishToTistoryAfterNaver: Boolean(account?.tistoryBlogId),
+    draftTistoryAutoPublish: $("#draftTistoryAutoPublish").checked,
+    publishToTistoryAfterNaver: Boolean(account?.tistoryBlogId) && ($("#publishVisibility").value !== "draft" || $("#draftTistoryAutoPublish").checked),
     tistoryBlogId: account?.tistoryBlogId || "",
     publishVisibility: $("#publishVisibility").value,
     publishPrivate: $("#publishVisibility").value !== "public",
@@ -1115,7 +1121,7 @@ function applySettings(settings) {
     }
   }
   $("#crossPublish").checked = settings.crossPublish === true;
-  if ($("#publishToTistoryAfterNaver")) $("#publishToTistoryAfterNaver").checked = false;
+  $("#draftTistoryAutoPublish").checked = settings.draftTistoryAutoPublish === true;
   state.tistorySessionStatus = settings.tistorySessionStatus || "unknown";
   $("#includeTitleImage").checked = settings.includeTitleImage !== false;
   $("#titleImageAspectRatio").value = normalizeImageAspectRatio(settings.titleImageAspectRatio || settings.imageAspectRatio);
@@ -1126,7 +1132,7 @@ function applySettings(settings) {
     $("#codexModel").value = selected;
   }
   applyAgentModels(settings.agentModels);
-  if (settings.publishPrivate === false) $("#publishVisibility").value = "public";
+  if (!settings.publishVisibility && settings.publishPrivate === false) $("#publishVisibility").value = "public";
   updateModeControls();
 }
 
@@ -1145,6 +1151,7 @@ async function saveSettingsNow() {
     naverEditorDomNotes: form.naverEditorDomNotes,
     publishAfterGenerate: form.publishAfterGenerate,
     publishToTistoryAfterNaver: form.publishToTistoryAfterNaver,
+    draftTistoryAutoPublish: form.draftTistoryAutoPublish,
     tistoryBlogId: form.tistoryBlogId,
     publishPrivate: form.publishPrivate,
     topicMode: form.topicMode,
@@ -1178,6 +1185,8 @@ function scheduleSettingsSave() {
 }
 
 function updateModeControls() {
+  $("#publishScheduleLabel").style.display = $("#publishVisibility").value === "public" ? "grid" : "none";
+  $("#draftTistoryLabel").hidden = $("#publishVisibility").value !== "draft" || !selectedAccount()?.tistoryBlogId;
   const isPrivatePublish = $("#publishVisibility").value !== "public";
   if (isPrivatePublish && $("#publishScheduleMode").value === "reserve") {
     $("#publishScheduleMode").value = "now";
@@ -1268,7 +1277,7 @@ function resetJobPreview(target){
 }
 function autoResultAction(result){
   if(result?.status==='session_expired')return 'login';
-  if(['success','generated','duplicate_retry'].includes(result?.status))return 'next';
+  if(['success','generated','draft_saved','duplicate_retry'].includes(result?.status))return 'next';
   if(result?.status==='failed' && result.failureKind==='quality')return 'next';
   return 'stop';
 }
@@ -1296,7 +1305,7 @@ async function startAutoPublishing(startTargetKey = '') {
       setTargetProgress(target,'진행 중');
       addLog({agent:'main',message:accountDisplayName(target.account)+' · '+target.category.name+' 작업 시작'});
       const result=await runAutoStartJob(collectForm({account:target.account,category:target.category,failOnLoginRequired:true}));
-      setTargetProgress(target,result?.status==='success'?'완료':result?.status==='session_expired'?'로그인 대기':result?.status==='publish_uncertain'?'발행 확인 필요':'실패',result?.reason || '');
+      setTargetProgress(target,['success','draft_saved'].includes(result?.status)?'완료':result?.status==='session_expired'?'로그인 대기':result?.status==='publish_uncertain'?'발행 확인 필요':'실패',result?.reason || '');
       if(autoResultAction(result)==='stop'){
         state.autoRunning=false;state.nextTarget=null;
         const reason=result?.reason || '실행 오류를 확인해 주세요.';

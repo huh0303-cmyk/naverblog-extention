@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BlogAuto · 네이버·티스토리 연결",
-  "version": "0.3.14",
+  "version": "0.3.16",
   "minimum_chrome_version": "120",
   "description": "일반 Chrome 로그인으로 네이버와 티스토리 글쓰기를 연결합니다.",
   "permissions": [
@@ -31,5 +31,17 @@
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png"
     }
-  }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://blog.naver.com/*"
+      ],
+      "js": [
+        "draft-reload-guard.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ]
 }

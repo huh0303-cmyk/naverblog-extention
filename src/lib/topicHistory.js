@@ -5,7 +5,7 @@ function accountHistory(history,{accountId,blogId}) {
 function publishedTopics(history) {
   const compact=(value,max)=>String(value || '').replace(/\s+/g,' ').trim().slice(0,max);
   const seen=new Set();
-  return history.filter(e=>e.title && ['success','generated'].includes(e.status)).reverse()
+  return history.filter(e=>e.title && ['success','generated','draft_saved'].includes(e.status)).reverse()
     .sort((a,b)=>Date.parse(b.create_at)-Date.parse(a.create_at))
     .filter(e=>{const key=compact(e.title,300);if(seen.has(key))return false;seen.add(key);return true;})
     .reverse().map(e=>({

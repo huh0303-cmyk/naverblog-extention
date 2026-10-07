@@ -562,7 +562,7 @@ async function publishSavedDraft(runtimeRoot, draft, jobId) {
     log: message=>safeLog(jobId,message),
     naver: value=>publishToNaver({...value,log:message=>safeLog(jobId,message)}),
     tistory: value=>{
-      updateStatus(jobId,'publishing','네이버 발행 완료 · 티스토리 이어 발행');
+      updateStatus(jobId,'publishing',`네이버 ${value.publishVisibility==='draft'?'임시저장':'발행'} 완료 · 티스토리 이어 발행`);
       return publishToTistory({...value,log:message=>safeLog(jobId,message)});
     }
   });
@@ -703,9 +703,9 @@ async function startJob(form) {
   const blogId = String(form.blogId || account.blogId || account.naverId || "").trim();
   const codexCmdPath = resolveCodexCmdPath(form.codexCmdPath || settings.codexCmdPath);
   const codexModel = normalizeCodexModel(form.codexModel ?? settings.codexModel);
-  const publishVisibility = String(form.publishVisibility || (form.publishPrivate === false ? "public" : "private"));
+  const publishVisibility = String(settings.pendingNaverPublishDraft?.publishVisibility || form.publishVisibility || (form.publishPrivate === false ? "public" : "private"));
   const publishPrivate = publishVisibility !== "public";
-  const publishScheduleMode = String(form.publishScheduleMode || "now");
+  const publishScheduleMode = publishVisibility==='draft'?'now':String(form.publishScheduleMode || "now");
   const reserveAfterHours = Number(form.reserveAfterHours || 0);
   const resumeOptions=settings.pendingGenerationDraft?.checkpoint?.generationOptions;
   if(resumeOptions)form={...form,...resumeOptions,codexModel:form.codexModel,agentModels:form.agentModels};
@@ -733,7 +733,9 @@ async function startJob(form) {
     } catch(error){activeJob=null;throw error;}
   }
   const resumeDraft=shouldPublish && pendingDraftMatches(settings.pendingNaverPublishDraft,{account,blogId,category}) ? settings.pendingNaverPublishDraft : null;
-  const tistoryBlogId = resumeDraft ? (resumeDraft.publishToTistoryAfterNaver!==false ? resumeDraft.tistoryBlogId || '' : '') : account.tistoryBlogId || "";
+  const tistoryBlogId = resumeDraft
+    ? (resumeDraft.publishToTistoryAfterNaver===true || (resumeDraft.publishVisibility!=='draft' && resumeDraft.publishToTistoryAfterNaver!==false) ? resumeDraft.tistoryBlogId || '' : '')
+    : (publishVisibility!=='draft' || form.draftTistoryAutoPublish===true) ? account.tistoryBlogId || '' : '';
   const publishToTistoryAfterNaver = shouldPublish && Boolean(tistoryBlogId);
   let tistoryPublishReady = publishToTistoryAfterNaver;
   if(publishToTistoryAfterNaver && publishScheduleMode==='reserve' && publishVisibility!=='public'){
@@ -922,7 +924,8 @@ async function startJob(form) {
       updateStatus(jobId, "publishing", "Naver pending draft publish resume");
       safeLog(jobId, "이전 작업의 작성 완료 draft를 재사용해 발행만 이어갑니다.", "info");
       await publishSavedDraft(runtimeRoot,pendingDraft,jobId);
-      const publishReason=pendingDraft.tistoryBlogId ? '네이버와 티스토리 발행 완료.' : '네이버 발행 완료.';
+      const completionStatus=pendingDraft.publishVisibility==='draft'?'draft_saved':'success';
+      const publishReason=pendingDraft.publishVisibility==='draft'?(pendingDraft.publishToTistoryAfterNaver ? '네이버 임시저장 및 티스토리 발행 완료.' : '네이버 임시저장 완료 · 빈 편집기 복귀 확인.'):pendingDraft.tistoryBlogId ? '네이버와 티스토리 발행 완료.' : '네이버 발행 완료.';
       clearPendingNaverPublishDraft(runtimeRoot);
       const embedding = createEmbedding(resumeAgentResult.title);
       appendHistory(runtimeRoot, {
@@ -935,7 +938,7 @@ async function startJob(form) {
         keyword: pendingDraft.keyword || keyword,
         category,
         ...(pendingDraft.keywordLane || {}),
-        status: "success",
+        status: completionStatus,
         harness_version: "lean-agent-v1",
         final_verdict: "PASS",
         failure_phase: "",
@@ -949,10 +952,10 @@ async function startJob(form) {
         token_total: Number(pendingDraft.tokenTotal || 0),
         reason: publishReason
       });
-      updateStatus(jobId, "success", "발행 완료");
+      updateStatus(jobId, completionStatus, publishReason);
       emit("job:complete", {
         ...nonSensitiveJob,
-        status: "success",
+        status: completionStatus,
         title: resumeAgentResult.title,
         article: resumeAgentResult.article,
         images: getPreviewImages(resumeAgentResult),
@@ -961,7 +964,7 @@ async function startJob(form) {
         tags: resumeTags,
         history: historyForUi(runtimeRoot)
       });
-      return { status: "success", resumedPendingPublish: true };
+      return { status: completionStatus, resumedPendingPublish: true };
     } catch (error) {
       if(error.code==='PUBLISH_UNCERTAIN')writeSettings(runtimeRoot,{pendingNaverPublishDraft:{...readSettings(runtimeRoot).pendingNaverPublishDraft,status:'publish_uncertain'}});
       if (error.code === "SESSION_EXPIRED" && account.id) {
@@ -997,7 +1000,7 @@ async function startJob(form) {
     keywordLanePlan = buildKeywordLanePlan(keyword, accountHistory, { category, excludedKeywordLanes });
     latestLaneResult = normalizeResearchLaneResult({}, keywordLanePlan);
     const publishedTopicHistory=require('./lib/topicHistory').publishedTopics(accountHistory);
-    const titleHistory = accountHistory.filter(entry=>entry.title && ['success','generated'].includes(entry.status)).map(entry=>({title:entry.title}));
+    const titleHistory = accountHistory.filter(entry=>entry.title && ['success','generated','draft_saved'].includes(entry.status)).map(entry=>({title:entry.title}));
 
     const usesImages = includeTitleImage || maxBodyImages > 0;
     const generationSubject = topic || `${category} ${keyword}`.trim();
@@ -1330,12 +1333,12 @@ async function startJob(form) {
       const durableDraft=buildPendingNaverPublishDraft({jobId,account,blogId,category,topic,keyword,agentResult,tags,publishPrivate,publishVisibility,publishScheduleMode,reserveAfterHours,breakSentencesInBody,publishToTistoryAfterNaver,tistoryBlogId,latestLaneResult,researchTitleResult,tokenUsage:jobTokenUsage});
       savePublicationState(runtimeRoot,durableDraft,jobId);
       writeSettings(runtimeRoot,{pendingGenerationDraft:null});
-      updateStatus(jobId, "publishing", `Naver 블로그 ${publishVisibility === "public" ? "전체공개" : "비공개"} 발행 자동화`);
+      updateStatus(jobId, "publishing", `Naver 블로그 ${publishVisibility === "draft" ? "임시저장" : publishVisibility === "public" ? "전체공개 발행" : "비공개 발행"} 자동화`);
       await publishSavedDraft(runtimeRoot,durableDraft,jobId);
-      publishReason=tistoryBlogId ? '네이버와 티스토리 발행 완료.' : '네이버 발행 완료.';
+      publishReason=publishVisibility==='draft'?(publishToTistoryAfterNaver ? '네이버 임시저장 및 티스토리 발행 완료.' : '네이버 임시저장 완료 · 빈 편집기 복귀 확인.'):tistoryBlogId ? '네이버와 티스토리 발행 완료.' : '네이버 발행 완료.';
       clearPendingNaverPublishDraft(runtimeRoot);
-      publishStatus = "success";
-      updateStatus(jobId, "success", "발행 완료");
+      publishStatus = publishVisibility==='draft'?'draft_saved':'success';
+      updateStatus(jobId, publishStatus, publishReason);
     } else {
       publishReason = "사용자가 발행 실행을 끄고 생성만 실행했습니다.";
       writeSettings(runtimeRoot,{pendingGenerationDraft:null});

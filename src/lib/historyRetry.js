@@ -1,6 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const terminal = new Set(['success', 'generated']);
+const terminal = new Set(['success', 'generated', 'draft_saved']);
 const key = value => String(value || '').normalize('NFKC').replace(/\s+/g, '').toLowerCase();
 function jobFile(root, id, name) {
   if (!/^job_\d+$/.test(String(id))) return null;

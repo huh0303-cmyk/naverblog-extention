@@ -1,5 +1,5 @@
 const { getBridge } = require('./extensionBridge');
-const MIN_EDITOR_BUILD = '20260928.3';
+const MIN_EDITOR_BUILD = '20261007.2';
 function naverScheduledAt(hours, now = Date.now()) {
   const delay = Number(hours ?? 3);
   if (!Number.isFinite(delay) || delay <= 0) throw new Error('예약 시간은 0보다 큰 숫자여야 합니다.');
@@ -28,12 +28,12 @@ async function publishToNaver(options={}) {
     title:options.title,article:options.article,titleImagePath:options.titleImagePath,
     bodyImages:options.bodyImages || [],tags:options.tags || [], category:options.category || '',
     publishVisibility:options.publishVisibility || (options.publishPrivate===false?'public':'private'),
-    publishScheduleMode:options.publishScheduleMode || 'now',reserveAfterHours:options.reserveAfterHours || 3,
-    scheduledAt:options.publishScheduleMode==='reserve' ? naverScheduledAt(options.reserveAfterHours) : undefined,
+    publishScheduleMode:options.publishVisibility==='draft'?'now':options.publishScheduleMode || 'now',reserveAfterHours:options.reserveAfterHours || 3,
+    scheduledAt:options.publishVisibility!=='draft' && options.publishScheduleMode==='reserve' ? naverScheduledAt(options.reserveAfterHours) : undefined,
     interactive:true,
     breakSentencesInBody:true
   },0);
   if (!require('./publishRecovery').confirmedPublication(result)) throw Object.assign(new Error('발행 완료를 확인하지 못했습니다. 열린 탭을 확인하세요.'),{code:'PUBLISH_UNCERTAIN'});
-  options.log?.(result.scheduled ? `네이버 예약 등록 완료: ${result.scheduledAt}` : `확장 발행 완료: ${result.url}`); return result;
+  options.log?.(result.saved ? '네이버 임시저장 완료 · 빈 편집기 복귀 확인' : result.scheduled ? `네이버 예약 등록 완료: ${result.scheduledAt}` : `확장 발행 완료: ${result.url}`); return result;
 }
 module.exports={publishToNaver,checkNaverSession,verifyOpenNaverSession:checkNaverSession,requireCompatibleEditor,naverScheduledAt};

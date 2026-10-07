@@ -28,6 +28,7 @@ const DEFAULT_SETTINGS = {
   publishScheduleMode: "now",
   reserveAfterHours: 3,
   publishToTistoryAfterNaver: false,
+  draftTistoryAutoPublish: false,
   tistoryBlogId: "",
   tistorySessionStatus: "unknown",
   tistorySessionCheckedAt: "",
@@ -70,6 +71,7 @@ function normalizeSettings(settings) {
   if (!normalized.naverSearchUrl || normalized.naverSearchUrl === LEGACY_NAVER_SEARCH_URL) {
     normalized.naverSearchUrl = DEFAULT_NAVER_SEARCH_URL;
   }
+  if(normalized.publishVisibility==='draft'){normalized.publishPrivate=true;normalized.publishScheduleMode='now';}
   normalized.imageAspectRatio = normalizeImageAspectRatio(normalized.imageAspectRatio);
   normalized.titleImageAspectRatio = normalizeImageAspectRatio(normalized.titleImageAspectRatio || normalized.imageAspectRatio);
   normalized.bodyImageAspectRatio = normalizeImageAspectRatio(normalized.bodyImageAspectRatio || normalized.imageAspectRatio);

@@ -1,5 +1,6 @@
 const uncertain = message => Object.assign(new Error(message), {code:'PUBLISH_UNCERTAIN'});
 function confirmedPublication(result) {
+  if(result?.saved===true)return result.published===false && result.verification==='draft-list' && result.cleanupComplete===true && Boolean(result.title && result.savedAt);
   return result?.published===true && (result.scheduled===true
     ? result.verification==='reservation-list' && Number.isFinite(Date.parse(result.scheduledAt)) && Boolean(result.managementUrl)
     : Boolean(result.url));
@@ -11,7 +12,7 @@ async function recoverPublication(draft,{bridge,save,log=()=>{}},platform) {
   const blogId=tistory?draft.tistoryBlogId:draft.blogId;
   if(!blogId)throw uncertain('이전 발행 대상 블로그를 확인할 수 없습니다.');
   const target=tistory?{tistoryBlogId:blogId}:{};
-  const matching=[...bridge.tasks.values()].filter(t=>t.type==='publish' && t.accountId===accountId && t.blogId===blogId && t.payload.title===draft.title && t.payload.article===draft.article);
+  const matching=[...bridge.tasks.values()].filter(t=>t.type==='publish' && t.accountId===accountId && t.blogId===blogId && t.payload.title===draft.title && t.payload.article===draft.article && (tistory || (t.payload.publishVisibility==='draft')===(draft.publishVisibility==='draft')));
   const latest=matching.at(-1);
   // The platform is marked running before its bridge request. A stopped app can
   // therefore leave running behind even though no final publish was attempted.

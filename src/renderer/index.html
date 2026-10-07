@@ -223,9 +223,13 @@
                 <select id="publishVisibility">
                   <option value="public">전체공개</option>
                   <option value="private">비공개</option>
+                  <option value="draft">임시저장</option>
                 </select>
               </label>
-              <label>
+              <label id="draftTistoryLabel" class="compact-check" hidden>
+                <input id="draftTistoryAutoPublish" type="checkbox" /><span>티스토리 자동발행</span>
+              </label>
+              <label id="publishScheduleLabel">
                 <span>발행시간</span>
                 <select id="publishScheduleMode">
                   <option value="now">현재</option>

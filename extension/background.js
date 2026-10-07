@@ -1,4 +1,4 @@
-importScripts('editor.js','article-plan.js','writer.js','tistory.js','tistory-writer.js');
+importScripts('naver-draft.js','editor.js','article-plan.js','writer.js','tistory.js','tistory-writer.js');
 const API = 'http://127.0.0.1:46321';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 let busy = false;
@@ -128,6 +128,19 @@ async function verifyReservation(task) {
     throw Object.assign(new Error(reason+' 자동으로 재발행하지 않습니다.'),{code:'PUBLISH_UNCERTAIN'});
   }finally{await chrome.tabs.remove(tab.id).catch(()=>{});}
 }
+async function saveNaverDraft(task,resumeOnly=false) {
+  const run=async action=>{
+    const results=await chrome.scripting.executeScript({target:{tabId:task.tabId},func:draftEditorCommand,args:[action,{title:task.payload.title}]});
+    const r=results[0]?.result;if(!r?.ok)throw new Error(r?.error || '임시저장 편집기 응답 없음');return r;
+  };
+  await api('/stage',{id:task.id,stage:'final_publish'});
+  await chrome.storage.local.set({activeTask:{...task,stage:resumeOnly?'draft_saved':'final_publish'}});
+  return completeNaverDraft({title:task.payload.title,
+    save:resumeOnly?null:()=>run('save'),verify:()=>run('verifySaved'),ready:()=>run('ready'),pause:sleep,
+    checkpoint:async proof=>{await chrome.storage.local.set({activeTask:{...task,stage:'draft_saved',draftProof:proof}});await api('/progress',{id:task.id,message:'네이버 임시저장 목록 확인 완료 · 새로고침 후 이어쓰기 취소'});},
+    reload:async()=>{await chrome.scripting.executeScript({target:{tabId:task.tabId},world:'MAIN',func:reloadSavedDraftPage});await chrome.tabs.reload(task.tabId);}
+  });
+}
 async function publish(task) {
   if(task.platform==='tistory')return publishTistory(task);
   const tabId=task.tabId, p=task.payload;
@@ -153,6 +166,7 @@ async function publish(task) {
   });
   await command(tabId,'imageAi');
   await command(tabId,'verify',{title:p.title,article:p.article,plan,titleQuote:true,requireAi:true,sectionStyle:'quotation_line',imageCount:p.bodyImages.filter(i=>i.index>=0).length+(p.titleImageIndex!==null?1:0)});
+  if(p.publishVisibility==='draft')return saveNaverDraft(task);
   await command(tabId,'click',{selector:'button[data-click-area="tpb.publish"], button[class*="publish_btn__"]',skipIfSelector:'button[data-testid="seOnePublishBtn"]'}); await sleep(400);
   await command(tabId,'settings',p);
   if((await inspect(tabId)).status!=='valid')throw new Error('로그인 상태가 변경되었습니다. 작성된 글을 확인하세요.');
@@ -227,7 +241,7 @@ async function resume(task) {
   }
   await api('/stage',{id:task.id,stage:'writing'});await chrome.storage.local.set({activeTask:{...task,stage:'writing'}});
   try {await finish({id:task.id,result:await publish(task)});}catch(error){
-    const current=(await stored()).activeTask; await finish({id:task.id,error:error.message,code:current?.stage==='final_publish'?'PUBLISH_UNCERTAIN':error.code || 'AUTHORING_FAILED'});
+    const current=(await stored()).activeTask; await finish({id:task.id,error:error.message,code:['final_publish','draft_saved'].includes(current?.stage)?'PUBLISH_UNCERTAIN':error.code || 'AUTHORING_FAILED'});
   }
 }
 async function pump() {
@@ -241,6 +255,10 @@ async function pump() {
         const task=state.activeTask;
         if(task.stage==='writing' && task.platform!=='tistory')task.editorResetStarted=false;
         await resume(task);
+      }
+      else if(state.activeTask.stage==='draft_saved'){
+        try{await finish({id:state.activeTask.id,result:await saveNaverDraft(state.activeTask,true)});}
+        catch(error){await finish({id:state.activeTask.id,error:error.message,code:'PUBLISH_UNCERTAIN'});}
       }
       else if(state.activeTask.payload.publishScheduleMode==='reserve'){
         try{await finish({id:state.activeTask.id,result:await verifyReservation(state.activeTask)});}

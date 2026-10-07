@@ -192,3 +192,7 @@ button{transition:background-color .15s,border-color .15s,color .15s}
 :root[data-theme="light"] .history-card.danger{border-left-color:#e76a75;background:#fff7f7}
 @media(max-width:1199px){.topbar{grid-template-columns:1fr}.header-actions{grid-column:1;grid-row:1}.agent-model-toolbar{grid-column:1;grid-row:2}}
 @media(max-width:760px){.header-actions{flex-wrap:wrap}.header-actions #runState{width:180px}.history-details dl>div{grid-template-columns:1fr;gap:4px}}
+
+#draftTistoryLabel[hidden]{display:none!important}
+#draftTistoryLabel{align-self:end;padding-bottom:10px;white-space:nowrap}
+.compact-check input[type="checkbox"]{margin:0}

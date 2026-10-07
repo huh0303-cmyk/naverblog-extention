@@ -155,7 +155,11 @@ class ExtensionBridge extends EventEmitter {
     if (url.pathname === '/result' && req.method === 'POST') {
       const t = this.tasks.get(body.id); if (!t || t.clientToken !== token) return this.reply(res,404,{error:'Unknown task'});
       if (['done','failed','cancelled','expired'].includes(t.state)) return this.reply(res,200,{ok:true});
-      if(t.type==='publish' && !body.error && body.result?.published!==true)throw new Error('발행 완료 확인이 누락되었습니다.');
+      if(t.type==='publish' && !body.error){
+        const draft=t.platform==='naver' && t.payload.publishVisibility==='draft';
+        const valid=draft ? body.result?.saved===true && body.result.title===t.payload.title && require('./publishRecovery').confirmedPublication(body.result) : body.result?.published===true && body.result?.saved!==true;
+        if(!valid)throw new Error('발행 또는 임시저장 완료 확인이 누락되었습니다.');
+      }
       t.state = body.error ? 'failed' : 'done'; t.result = body.result || null; t.error = String(body.error || ''); t.code=String(body.code || ''); this.saveTasks();
       if(t.type==='session' && STATES.has(body.result?.status))this.updateSession(c,{...body.result,checkedAt:new Date().toISOString()});
       this.emit('status',c.accountId,this.snapshot(c.accountId));

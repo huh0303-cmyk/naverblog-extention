@@ -19,7 +19,7 @@ async function publishToTistory(options={}) {
   const result=await getBridge().request(TISTORY_ACCOUNT_ID,'publish',{
     tistoryBlogId,title:options.title,article:options.article,titleImagePath:options.titleImagePath,
     bodyImages:options.bodyImages || [],tags:options.tags || [],category:options.category || '',
-    publishVisibility:options.publishVisibility || (options.publishPrivate===false?'public':'private'),
+    publishVisibility:options.publishVisibility==='draft' ? 'public' : options.publishVisibility || (options.publishPrivate===false?'public':'private'),
     publishScheduleMode:options.publishScheduleMode || 'now',reserveAfterHours:options.reserveAfterHours || 3,
     scheduledAt:options.publishScheduleMode==='reserve' ? new Date(Math.ceil((Date.now()+Number(options.reserveAfterHours || 3)*3600000)/60000)*60000).toISOString() : undefined,
     breakSentencesInBody:true,interactive:true
