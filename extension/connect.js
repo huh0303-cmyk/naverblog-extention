@@ -5,3 +5,5 @@ document.querySelector('#pairForm').onsubmit=async e=>{e.preventDefault();try {s
 document.querySelector('#login').onclick=async()=>{try{status.textContent='열린 블로그 화면에서 로그인하면 자동으로 확인합니다.';await action('session');await refresh();}catch(e){status.textContent=e.message;}};
 document.querySelector('#disconnect').onclick=async()=>{try{await action('disconnect');await refresh();}catch(e){status.textContent=e.message;}};
 refresh().catch(e=>status.textContent=e.message); setInterval(()=>refresh().catch(()=>{}),5000);
+const autoCode=new URLSearchParams(location.search).get('code');
+if(autoCode){setTimeout(()=>{const input=document.querySelector('#code');if(input){input.value=autoCode.trim();document.querySelector('#pairForm').requestSubmit();}},300);}

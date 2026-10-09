@@ -106,6 +106,13 @@ class ExtensionBridge extends EventEmitter {
     const url = new URL(req.url, 'http://127.0.0.1');
     let body = {}; let raw = '';
     if (req.method === 'POST') { for await (const chunk of req) { raw += chunk; if (Buffer.byteLength(raw) > 1024*1024) throw new Error('Request too large'); } body = raw ? JSON.parse(raw) : {}; }
+    if (url.pathname === '/pair-code' && req.method === 'POST') {
+      const accountId = String(body.accountId || '').trim();
+      const entry = this.codes.get('__unused__');
+      if (!accountId) return this.reply(res,400,{error:'accountId required'});
+      const pairing = this.pairCode(accountId, String(body.blogId || '').trim(), String(body.label || '').trim(), String(body.platform || 'naver'));
+      return this.reply(res,200,pairing);
+    }
     if (url.pathname === '/pair' && req.method === 'POST') {
       const key = req.socket.remoteAddress; const attempts = this.attempts.get(key) || { count: 0, start: Date.now() };
       if (Date.now()-attempts.start > 60000) { attempts.count=0; attempts.start=Date.now(); }

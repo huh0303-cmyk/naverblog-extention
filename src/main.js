@@ -65,6 +65,8 @@ let mainWindow;
 let activeJob = null;
 const activeTistorySessions = new Map();
 
+app.setLoginItemSettings({ openAtLogin: true, path: process.execPath });
+
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch("disable-gpu");
 app.commandLine.appendSwitch("disable-software-rasterizer");

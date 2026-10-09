@@ -1,7 +1,14 @@
 {
   "version": 1,
   "updatedAt": "2026-10-09",
-  "credentialsPolicy": "No passwords stored. Use browser sessions/cookies only.",
+  "credentialsPolicy": "Credentials may be entered by the user and must be stored only in the OS-protected app/browser credential store; never write plaintext passwords to Git, logs, JSON registries, or task history.",
+  "categoryRules": {
+    "기타핫이슈": {
+      "type": "broad_hot_issue",
+      "scope": ["스포츠", "정치·국정감사", "화제의 발언", "생활경제", "연예·대중문화", "사회 이슈", "인터넷 화제"],
+      "selection": "검색량·화제성·대중 관심도를 폭넓게 확인하고 재미있고 읽을 가치가 있는 주제를 선택하되 사실관계를 확인한다. 정치 주제는 중립적·사실 중심으로 작성한다."
+    }
+  },
   "naver": [
     {
       "label": "\uBD80\uC758\uC815\uC11D",
