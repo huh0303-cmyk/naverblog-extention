@@ -1,5 +1,6 @@
 importScripts('naver-draft.js','editor.js','article-plan.js','writer.js','tistory.js','tistory-writer.js');
 const API = 'http://127.0.0.1:46321';
+(async()=>{try{const s=await chrome.storage.local.get(['connection','deviceId']);if(!s.connection){const deviceId=s.deviceId||crypto.randomUUID();const r=await fetch(API+'/pair',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({deviceId})});const d=await r.json();if(!r.ok)throw new Error(d.error||'pair failed');await chrome.storage.local.set({deviceId,connection:d});}}catch(e){await chrome.storage.local.set({connectionError:e.message});}})();
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 let busy = false;
 let refreshSession = false;
