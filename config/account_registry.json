@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "updatedAt": "2026-10-09",
+  "credentialsPolicy": "No passwords stored. Use browser sessions/cookies only.",
+  "naver": [
+    {
+      "label": "\uBD80\uC758\uC815\uC11D",
+      "naverId": "huh0303",
+      "blogId": "huh0303",
+      "categories": ["\uBD80\uC758\uD750\uB984-\uAD6D\uAC00\uC815\uCC45", "\uAE30\uD0C0\uD56B\uC774\uC288"]
+    },
+    {
+      "label": "\uD5EC\uC2A4\uC758\uC815\uC11D",
+      "naverId": "huh3",
+      "blogId": "huh3",
+      "categories": ["\uAC74\uAC15\uC758\uD559\uC815\uBCF4", "\uAE30\uD0C0\uD56B\uC774\uC288"]
+    },
+    {
+      "label": "\uC0DD\uD65C\uC758\uC815\uC11D",
+      "naverId": "huh4",
+      "blogId": "huh4",
+      "categories": ["\uC0DD\uD65C\uC815\uBCF4", "\uAE30\uD0C0\uD56B\uC774\uC288"]
+    }
+  ],
+  "tistory": [
+    {"id":"k-vietnam","label":"\uD55C\uAD6D\uBD80\uB3D9\uC0B0\uAE08\uC735\uC815\uBCF4","url":"https://k-vietnam.tistory.com/"},
+    {"id":"k-insight-vietnam","label":"\uD55C\uAD6D\uBCF4\uD5D8\uC815\uBCF4","url":"https://k-insight-vietnam.tistory.com/"},
+    {"id":"k-healthcare","label":"\uD55C\uAD6D\uAC74\uAC15\uC815\uBCF4","url":"https://k-healthcare.tistory.com/"},
+    {"id":"huh0303","label":"\uD55C\uAD6D\uC0DD\uD65C\uC815\uBCF4","url":"https://huh0303.tistory.com/"},
+    {"id":"k-trip365","label":"\uD55C\uAD6D\uC5EC\uD589\uC815\uBCF4","url":"https://k-trip365.tistory.com/"}
+  ]
+}
