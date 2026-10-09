@@ -314,6 +314,9 @@ chrome.runtime.onMessage.addListener((message,_sender,reply)=>{
     }
     if(message.type==='session'){await api('/session/request');pump();return {ok:true};}
     if(message.type==='disconnect'){if((await stored()).activeTask)throw new Error('앱에서 대기를 먼저 취소하세요.');await api('/disconnect');await chrome.storage.local.remove(['connection','session','editorTab']);return {ok:true};}
+    if(message.type==='quickStatus'){const state=await stored();return {connection:state.connection || null,session:state.session || null};}
+    if(message.type==='quickSession'){await api('/session/request');pump();return {ok:true};}
+    if(message.type==='quickOpen'){const state=await stored();if(!state.connection)throw new Error('앱에서 먼저 계정을 연결하세요.');const tabId=await editorTab(true,{blogId:state.connection.blogId,type:'publish',platform:state.connection.platform,payload:{interactive:true},freshEditor:true});return {ok:true,tabId};}
     throw new Error('지원하지 않는 요청');
   })().then(reply,error=>reply({error:error.message}));return true;
 });
