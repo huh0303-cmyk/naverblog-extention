@@ -27,7 +27,7 @@
   },
   "action": {
     "default_title": "BlogAuto 연결 열기",
-    "default_popup": "connect.html",
+    "default_popup": "quick.html",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png"
